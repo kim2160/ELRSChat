@@ -4,6 +4,43 @@
 
 **ExpressLRS 기반의 독립적인 실험용 채팅 포크**
 
+## ELRSChat 변경 경로 한눈에 보기
+
+ExpressLRS 4.1.0에서 추가하거나 수정한 주요 경로입니다.
+
+```text
+ELRSChat/
+├── patches/
+│   └── elrs-4.1.0-chat.patch      # 채팅 소스 전체 diff
+├── src/
+│   ├── lua/
+│   │   ├── ELRSChat.lua          # EdgeTX 실행 스크립트
+│   │   └── ELRSChat/r16/         # 보조 파일 네 개 모두 필요
+│   │       ├── common.lua
+│   │       ├── core.lua
+│   │       ├── transport.lua
+│   │       └── view.lua
+│   ├── lib/
+│   │   ├── ElrsChat/            # 신규 채팅 엔진·프로토콜·RF 어댑터
+│   │   ├── DEVICE/              # 일반 RC 일시 정지·재개
+│   │   ├── tx-crsf/             # 채팅 파라미터 인터페이스
+│   │   ├── LR1121Driver/        # 무선 드라이버 연동
+│   │   ├── SX127xDriver/        # 무선 드라이버 연동
+│   │   ├── SX1280Driver/        # 무선 드라이버 연동
+│   │   └── SX12xxDriverCommon/  # 공통 무선 드라이버 연동
+│   ├── include/deferred.h      # 지연 실행 작업 조정
+│   ├── src/
+│   │   ├── rxtx_common.cpp      # RF 모드 연동
+│   │   └── tx_main.cpp          # 채팅 진입·종료 및 일반 RC 복귀
+│   └── test/test_elrs_chat/     # native 테스트
+├── tools/                      # 빌드·검사·소스 확인 도구
+└── docs/chat-development.md     # 빌드·테스트 안내
+```
+
+바로가기: [Lua 실행 파일](src/lua/ELRSChat.lua) · [필수 Lua 보조 파일](src/lua/ELRSChat/r16) · [소스 전체 diff](patches/elrs-4.1.0-chat.patch)
+
+## 프로젝트 소개
+
 공식 ExpressLRS 배포본이나 공식 승인 기능이 아닙니다.
 
 ELRS 송신 모듈 두 대 이상이 짧은 공개 메시지를 주고받는 기능을 추가합니다.

@@ -4,6 +4,43 @@
 
 **An independent experimental public-chat fork of ExpressLRS.**
 
+## ELRSChat changes at a glance
+
+Key paths added or modified from ExpressLRS 4.1.0:
+
+```text
+ELRSChat/
+├── patches/
+│   └── elrs-4.1.0-chat.patch      # Complete chat source diff
+├── src/
+│   ├── lua/
+│   │   ├── ELRSChat.lua          # EdgeTX tool entry point
+│   │   └── ELRSChat/r16/         # All four supporting files required
+│   │       ├── common.lua
+│   │       ├── core.lua
+│   │       ├── transport.lua
+│   │       └── view.lua
+│   ├── lib/
+│   │   ├── ElrsChat/            # New chat engine, protocol, and RF adapter
+│   │   ├── DEVICE/              # RC pause/resume support
+│   │   ├── tx-crsf/             # Chat parameter interface
+│   │   ├── LR1121Driver/        # Radio integration
+│   │   ├── SX127xDriver/        # Radio integration
+│   │   ├── SX1280Driver/        # Radio integration
+│   │   └── SX12xxDriverCommon/  # Shared radio integration
+│   ├── include/deferred.h      # Deferred-operation coordination
+│   ├── src/
+│   │   ├── rxtx_common.cpp      # RF mode integration
+│   │   └── tx_main.cpp          # Chat entry/exit and normal RC restoration
+│   └── test/test_elrs_chat/     # Native tests
+├── tools/                      # Build, inspection, and source-check helpers
+└── docs/chat-development.md     # Build and test guide
+```
+
+Quick links: [Lua tool](src/lua/ELRSChat.lua) · [Required Lua modules](src/lua/ELRSChat/r16) · [Full source diff](patches/elrs-4.1.0-chat.patch)
+
+## Overview
+
 This is an independent project, with no official ExpressLRS release status or endorsement.
 
 ELRSChat lets two or more ELRS transmitter modules exchange short public messages.
