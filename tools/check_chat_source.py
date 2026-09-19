@@ -20,15 +20,19 @@ def main():
         raise SystemExit('Generated artifacts must not be tracked:\n' + '\n'.join(unexpected))
     required = (
         'LICENSE', 'LICENSES/GPL-2.0.txt', 'LICENSES/BSD-3-Clause.txt',
-        'NOTICE.md', 'README.upstream.md', PATCH,
+        'NOTICE.md', 'README.md', 'README.ko.md', 'README.upstream.md', PATCH,
         'src/lib/ElrsChat/ChatEngine.cpp', 'src/test/test_elrs_chat/test_chat.cpp',
         'src/lua/ELRSChat.lua', 'src/lua/ELRSChat/r16/transport.lua',
     )
     for name in required:
         if name not in tracked or not (ROOT / name).is_file():
             raise SystemExit(f'Required source or notice is missing from Git: {name}')
-    if 'ExpressLRS 기반의 독립적인 실험용 채팅 포크' not in (ROOT / 'README.md').read_text(encoding='utf-8'):
-        raise SystemExit('README must identify this as an independent experimental fork.')
+    for name, notice in (
+        ('README.md', 'An independent experimental public-chat fork of ExpressLRS.'),
+        ('README.ko.md', 'ExpressLRS 기반의 독립적인 실험용 채팅 포크'),
+    ):
+        if notice not in (ROOT / name).read_text(encoding='utf-8'):
+            raise SystemExit(f'{name} must identify this as an independent experimental fork.')
     upstream_license = git('show', f'{BASE}:LICENSE').replace(b'\r\n', b'\n')
     if (ROOT / 'LICENSE').read_bytes().replace(b'\r\n', b'\n') != upstream_license:
         raise SystemExit('The upstream root license was changed.')
