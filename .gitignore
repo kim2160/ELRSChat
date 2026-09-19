@@ -8,3 +8,22 @@ src/.vscode
 src/data/*.ini
 src/data/*.json
 src/hardware
+
+# ELRSChat: local build products and generated configuration
+.tools/
+build/
+dist/
+__pycache__/
+*.pyc
+*.bin
+*.elf
+*.hex
+*.uf2
+*.zip
+*.exe
+*.dll
+*.luac
+src/.pio/
+src/chat-platformio.ini
+src/chat_options.ini
+src/targets/chat.ini

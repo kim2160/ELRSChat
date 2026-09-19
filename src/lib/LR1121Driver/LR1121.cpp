@@ -1,3 +1,4 @@
+// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 #include "LR1121.h"
 #include "lr1121_transceiver_F30104.h"
 #include "LR1121_hal.h"

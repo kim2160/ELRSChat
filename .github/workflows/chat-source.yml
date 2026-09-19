@@ -1,0 +1,29 @@
+name: Chat source checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Check source-only contents and patch
+        run: python tools/check_chat_source.py
+      - name: Install PlatformIO
+        run: python -m pip install platformio==6.1.19
+      - name: Run chat native tests
+        env:
+          PLATFORMIO_BUILD_FLAGS: -DRegulatory_Domain_ISM_2400
+        run: pio test -d src -e native -f test_elrs_chat

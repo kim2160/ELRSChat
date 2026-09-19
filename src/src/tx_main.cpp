@@ -1,3 +1,4 @@
+// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 #include "rxtx_common.h"
 #ifdef ELRS_CHAT
 #include "ChatDevice.h" // ELRS_CHAT_RUNTIME_V3

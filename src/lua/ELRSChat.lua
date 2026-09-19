@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 -- ELRS Public Chat r16 / EdgeTX. GPL-3.0-or-later.
 -- Copy this file AND the ELRSChat folder to /SCRIPTS/TOOLS/.
 -- Same r13-capable module firmware; no changes to RF or normal RC.

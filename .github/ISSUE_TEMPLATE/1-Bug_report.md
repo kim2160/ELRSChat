@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: You found a bug in ExpressLRS. 🐞
+about: Report a problem with the independent ELRSChat fork.
 labels: 'bug'
 ---
 
@@ -38,10 +38,10 @@ labels: 'bug'
 <!--- Include as many relevant details about the environment you experienced the bug in -->
 
 - TX hardware:
-- RX hardware:
+- Peer TX hardware:
 - Handset model:
-- OpenTX version (including nightly number)
-- ExpressLRS version (TX & RX MUST MATCH):
-- Packet Rate:
-- Telemetry Ratio:
-- user_defines:
+- EdgeTX version:
+- ELRSChat commit and Lua version:
+- Build command / board key:
+- Chat frequency and power:
+- Does this happen in normal RC mode or chat mode?

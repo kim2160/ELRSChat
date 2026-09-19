@@ -1,3 +1,4 @@
+// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 #include "targets.h"
 #include "common.h"
 #include "config.h"

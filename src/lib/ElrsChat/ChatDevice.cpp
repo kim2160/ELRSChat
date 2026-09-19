@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 #include "targets.h"
 #if defined(ELRS_CHAT) && defined(TARGET_TX)
 #include "ChatDevice.h"

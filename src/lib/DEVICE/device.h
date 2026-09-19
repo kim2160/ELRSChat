@@ -1,3 +1,4 @@
+// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 #pragma once
 
 #include <stdint.h>

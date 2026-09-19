@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 // Included once, late in tx_main.cpp, to use the upstream RC state directly.
 // All calls run on the loop/SPI interrupt core, outside device callbacks.
 #include "deferred.h"

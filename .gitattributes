@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Unified diffs contain space-only context lines; license text is verbatim.
+patches/*.patch -whitespace
+LICENSES/BSD-3-Clause.txt -whitespace

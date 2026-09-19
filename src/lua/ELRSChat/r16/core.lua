@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 -- ELRS Public Chat r16. GPL-3.0-or-later.
 -- Private per-script state; no globals shared with other Lua tools.
 local q = ...

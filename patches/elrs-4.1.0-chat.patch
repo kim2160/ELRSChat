@@ -1,8 +1,12 @@
 diff --git a/src/include/deferred.h b/src/include/deferred.h
-index 35d3e0c7..a0fe6852 100644
+index 35d3e0c7..a4f55108 100644
 --- a/src/include/deferred.h
 +++ b/src/include/deferred.h
-@@ -4,6 +4,9 @@
+@@ -1,9 +1,13 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #pragma once
+ 
+ #include <functional>
  
  void deferExecutionMicros(unsigned long us, std::function<void()> f);
  void executeDeferredFunction(unsigned long now);
@@ -14,10 +18,12 @@ index 35d3e0c7..a0fe6852 100644
  {
 diff --git a/src/lib/DEVICE/DevicePause.h b/src/lib/DEVICE/DevicePause.h
 new file mode 100644
-index 00000000..6715d0d2
+index 00000000..bc906b65
 --- /dev/null
 +++ b/src/lib/DEVICE/DevicePause.h
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#pragma once
 +#include <stdint.h>
 +
@@ -51,10 +57,15 @@ index 00000000..6715d0d2
 +};
 +}
 diff --git a/src/lib/DEVICE/device.cpp b/src/lib/DEVICE/device.cpp
-index 6a11d1d8..36de282e 100644
+index 6a11d1d8..ff94b1b9 100644
 --- a/src/lib/DEVICE/device.cpp
 +++ b/src/lib/DEVICE/device.cpp
-@@ -42,6 +42,44 @@ static SemaphoreHandle_t semCore0Complete = nullptr;
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #include "targets.h"
+ #include "common.h"
+ #include "logging.h"
+@@ -42,6 +43,44 @@ static SemaphoreHandle_t semCore0Complete = nullptr;
  #define CURRENT_CORE -1
  #endif
  
@@ -99,7 +110,7 @@ index 6a11d1d8..36de282e 100644
  void devicesRegister(device_affinity_t *devices, uint8_t count)
  {
      uiDevices = devices;
-@@ -139,6 +177,9 @@ static int _devicesUpdate(unsigned long now)
+@@ -139,6 +178,9 @@ static int _devicesUpdate(unsigned long now)
  {
      const int32_t core = CURRENT_CORE;
      const int32_t coreMulti = (core == -1) ? 0 : core;
@@ -109,7 +120,7 @@ index 6a11d1d8..36de282e 100644
  
      bool newModelMatch = connectionHasModelMatch && teamraceHasModelMatch;
      uint32_t events = eventFired[coreMulti];
-@@ -150,6 +191,9 @@ static int _devicesUpdate(unsigned long now)
+@@ -150,6 +192,9 @@ static int _devicesUpdate(unsigned long now)
      {
          for(size_t i=0 ; i<deviceCount ; i++)
          {
@@ -119,7 +130,7 @@ index 6a11d1d8..36de282e 100644
              if ((uiDevices[i].core == core || core == -1) && (uiDevices[i].device->event && (uiDevices[i].device->subscribe & events) != 0))
              {
                  int delay = (uiDevices[i].device->event)();
-@@ -164,6 +208,9 @@ static int _devicesUpdate(unsigned long now)
+@@ -164,6 +209,9 @@ static int _devicesUpdate(unsigned long now)
      int smallest_delay = DURATION_NEVER;
      for(size_t i=0 ; i<deviceCount ; i++)
      {
@@ -130,10 +141,15 @@ index 6a11d1d8..36de282e 100644
          {
              int delay = deviceTimeout[i] == 0xFFFFFFFF ? DURATION_NEVER : (int)(deviceTimeout[i]-now);
 diff --git a/src/lib/DEVICE/device.h b/src/lib/DEVICE/device.h
-index 198b234b..24cfa6cb 100644
+index 198b234b..f144e9de 100644
 --- a/src/lib/DEVICE/device.h
 +++ b/src/lib/DEVICE/device.h
-@@ -115,3 +115,7 @@ void devicesTriggerEvent(uint32_t events);
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #pragma once
+ 
+ #include <stdint.h>
+@@ -115,3 +116,7 @@ void devicesTriggerEvent(uint32_t events);
   * This destroys the FreeRTOS task running on the alternate core(s).
   */
  void devicesStop();
@@ -143,10 +159,12 @@ index 198b234b..24cfa6cb 100644
 +#endif
 diff --git a/src/lib/ElrsChat/ChatDevice.cpp b/src/lib/ElrsChat/ChatDevice.cpp
 new file mode 100644
-index 00000000..b1bfadc0
+index 00000000..bff4c732
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatDevice.cpp
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,321 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#include "targets.h"
 +#if defined(ELRS_CHAT) && defined(TARGET_TX)
 +#include "ChatDevice.h"
@@ -468,10 +486,12 @@ index 00000000..b1bfadc0
 +#endif
 diff --git a/src/lib/ElrsChat/ChatDevice.h b/src/lib/ElrsChat/ChatDevice.h
 new file mode 100644
-index 00000000..b6de7ede
+index 00000000..5cad6000
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatDevice.h
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,21 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#pragma once
 +#include "targets.h"
 +#if defined(ELRS_CHAT) && defined(TARGET_TX)
@@ -493,10 +513,12 @@ index 00000000..b6de7ede
 +#endif
 diff --git a/src/lib/ElrsChat/ChatEngine.cpp b/src/lib/ElrsChat/ChatEngine.cpp
 new file mode 100644
-index 00000000..614772de
+index 00000000..24966d79
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatEngine.cpp
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,200 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#include "ChatEngine.h"
 +#include <string.h>
 +
@@ -697,10 +719,12 @@ index 00000000..614772de
 +}
 diff --git a/src/lib/ElrsChat/ChatEngine.h b/src/lib/ElrsChat/ChatEngine.h
 new file mode 100644
-index 00000000..209a177c
+index 00000000..c6d753fc
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatEngine.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#pragma once
 +#include "ChatProtocol.h"
 +
@@ -770,10 +794,12 @@ index 00000000..209a177c
 +}
 diff --git a/src/lib/ElrsChat/ChatMailbox.h b/src/lib/ElrsChat/ChatMailbox.h
 new file mode 100644
-index 00000000..dd18638a
+index 00000000..4ed30551
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatMailbox.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,124 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#pragma once
 +#include "ChatProtocol.h"
 +#include <string.h>
@@ -898,10 +924,12 @@ index 00000000..dd18638a
 +}
 diff --git a/src/lib/ElrsChat/ChatProfile.h b/src/lib/ElrsChat/ChatProfile.h
 new file mode 100644
-index 00000000..ba67f21d
+index 00000000..9310cf08
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatProfile.h
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#pragma once
 +#include "ChatEngine.h"
 +
@@ -922,10 +950,12 @@ index 00000000..ba67f21d
 +}
 diff --git a/src/lib/ElrsChat/ChatProtocol.cpp b/src/lib/ElrsChat/ChatProtocol.cpp
 new file mode 100644
-index 00000000..982960bf
+index 00000000..8d04da4e
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatProtocol.cpp
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#include "ChatProtocol.h"
 +#include <string.h>
 +
@@ -996,10 +1026,12 @@ index 00000000..982960bf
 +}
 diff --git a/src/lib/ElrsChat/ChatProtocol.h b/src/lib/ElrsChat/ChatProtocol.h
 new file mode 100644
-index 00000000..17eb9062
+index 00000000..0cd6066f
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatProtocol.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,44 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#pragma once
 +#include <stddef.h>
 +#include <stdint.h>
@@ -1044,10 +1076,12 @@ index 00000000..17eb9062
 +}
 diff --git a/src/lib/ElrsChat/ChatRcIntegration.h b/src/lib/ElrsChat/ChatRcIntegration.h
 new file mode 100644
-index 00000000..0e535968
+index 00000000..86d571fe
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatRcIntegration.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,106 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +// Included once, late in tx_main.cpp, to use the upstream RC state directly.
 +// All calls run on the loop/SPI interrupt core, outside device callbacks.
 +#include "deferred.h"
@@ -1154,10 +1188,12 @@ index 00000000..0e535968
 +}
 diff --git a/src/lib/ElrsChat/ChatSession.h b/src/lib/ElrsChat/ChatSession.h
 new file mode 100644
-index 00000000..b22b504b
+index 00000000..28a3d17e
 --- /dev/null
 +++ b/src/lib/ElrsChat/ChatSession.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#pragma once
 +#include "ChatProtocol.h"
 +
@@ -1272,10 +1308,15 @@ index 00000000..90481d86
 +transport is intentionally not supported, because retaining it would retain the
 +CRSF namespace conflict. The RF message format remains version 1.
 diff --git a/src/lib/LR1121Driver/LR1121.cpp b/src/lib/LR1121Driver/LR1121.cpp
-index 175feeb2..7371642a 100644
+index 175feeb2..a2d8602c 100644
 --- a/src/lib/LR1121Driver/LR1121.cpp
 +++ b/src/lib/LR1121Driver/LR1121.cpp
-@@ -645,7 +645,11 @@ void ICACHE_RAM_ATTR LR1121Driver::TXnb(uint8_t *data, const bool sendGeminiBuff
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #include "LR1121.h"
+ #include "lr1121_transceiver_F30104.h"
+ #include "LR1121_hal.h"
+@@ -645,7 +646,11 @@ void ICACHE_RAM_ATTR LR1121Driver::TXnb(uint8_t *data, const bool sendGeminiBuff
          }
      }
  
@@ -1288,10 +1329,15 @@ index 175feeb2..7371642a 100644
      codec->encode(outBuffer, data, PayloadLength);
      if (sendGeminiBuffer)
 diff --git a/src/lib/LR1121Driver/LR1121.h b/src/lib/LR1121Driver/LR1121.h
-index ba4c5318..176e7989 100644
+index ba4c5318..76027571 100644
 --- a/src/lib/LR1121Driver/LR1121.h
 +++ b/src/lib/LR1121Driver/LR1121.h
-@@ -64,6 +64,9 @@ public:
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #pragma once
+ 
+ #include "targets.h"
+@@ -64,6 +65,9 @@ public:
      int WriteUpdateBytes(const uint8_t *bytes, uint32_t size);
      int EndUpdate();
  
@@ -1301,7 +1347,7 @@ index ba4c5318..176e7989 100644
  private:
      // constant used for no power change pending
      // must not be a valid power register value
-@@ -82,8 +85,13 @@ private:
+@@ -82,8 +86,13 @@ private:
      lr11xx_RadioOperatingModes_t fallBackMode;
      BufferCodec *codec;
  
@@ -1316,10 +1362,15 @@ index ba4c5318..176e7989 100644
      bool CheckVersion(SX12XX_Radio_Number_t radioNumber);
  
 diff --git a/src/lib/SX127xDriver/SX127x.h b/src/lib/SX127xDriver/SX127x.h
-index e18ca331..eb5401e3 100644
+index e18ca331..4b1e3f2a 100644
 --- a/src/lib/SX127xDriver/SX127x.h
 +++ b/src/lib/SX127xDriver/SX127x.h
-@@ -75,6 +75,9 @@ public:
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #pragma once
+ 
+ #include "SX127xRegs.h"
+@@ -75,6 +76,9 @@ public:
      /////////////Non-blocking RX related Functions///////////////
      void RXnb();
  
@@ -1330,10 +1381,15 @@ index e18ca331..eb5401e3 100644
      // constant used for no power change pending
      // must not be a valid power register value
 diff --git a/src/lib/SX1280Driver/SX1280.h b/src/lib/SX1280Driver/SX1280.h
-index 7f153727..167b9d73 100644
+index 7f153727..a8d964e7 100644
 --- a/src/lib/SX1280Driver/SX1280.h
 +++ b/src/lib/SX1280Driver/SX1280.h
-@@ -43,6 +43,9 @@ public:
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #pragma once
+ 
+ #include "targets.h"
+@@ -43,6 +44,9 @@ public:
      void GetLastPacketStats();
      void CheckForSecondPacket();
  
@@ -1344,10 +1400,15 @@ index 7f153727..167b9d73 100644
      // constant used for no power change pending
      // must not be a valid power register value
 diff --git a/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h b/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h
-index 23d7a8ce..89ad477c 100644
+index 23d7a8ce..837b92d7 100644
 --- a/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h
 +++ b/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h
-@@ -70,7 +70,11 @@ public:
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #pragma once
+ 
+ #include "targets.h"
+@@ -70,7 +71,11 @@ public:
      bool (*RXdoneCallback)(rx_status crcFail); //function pointer for callback
      void (*TXdoneCallback)(); //function pointer for callback
  
@@ -1360,10 +1421,11 @@ index 23d7a8ce..89ad477c 100644
      WORD_ALIGNED_ATTR uint8_t RXdataBufferSecond[RXBuffSize];
  
 diff --git a/src/lib/tx-crsf/TXModuleEndpoint.cpp b/src/lib/tx-crsf/TXModuleEndpoint.cpp
-index 2e1480e4..c50b1131 100644
+index 2e1480e4..35d98c8a 100644
 --- a/src/lib/tx-crsf/TXModuleEndpoint.cpp
 +++ b/src/lib/tx-crsf/TXModuleEndpoint.cpp
-@@ -1,4 +1,7 @@
+@@ -1,4 +1,8 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
  #include "TXModuleEndpoint.h"
 +#ifdef ELRS_CHAT
 +#include "ChatDevice.h"
@@ -1371,7 +1433,7 @@ index 2e1480e4..c50b1131 100644
  
  #include "rxtx_intf.h"
  #include "CRSFRouter.h"
-@@ -27,6 +30,9 @@ void TXModuleEndpoint::begin()
+@@ -27,6 +31,9 @@ void TXModuleEndpoint::begin()
      }
  #endif
      registerParameters();
@@ -1381,7 +1443,7 @@ index 2e1480e4..c50b1131 100644
  }
  
  bool TXModuleEndpoint::handleRaw(const crsf_header_t *message)
-@@ -41,6 +47,9 @@ bool TXModuleEndpoint::handleRaw(const crsf_header_t *message)
+@@ -41,6 +48,9 @@ bool TXModuleEndpoint::handleRaw(const crsf_header_t *message)
  
  void TXModuleEndpoint::handleMessage(const crsf_header_t *message)
  {
@@ -1393,10 +1455,12 @@ index 2e1480e4..c50b1131 100644
      const auto extMessage = (crsf_ext_header_t *)message;
 diff --git a/src/lua/ELRSChat.lua b/src/lua/ELRSChat.lua
 new file mode 100644
-index 00000000..6e3050d8
+index 00000000..8c657322
 --- /dev/null
 +++ b/src/lua/ELRSChat.lua
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,46 @@
++-- SPDX-License-Identifier: GPL-3.0-or-later
++-- ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +-- ELRS Public Chat r16 / EdgeTX. GPL-3.0-or-later.
 +-- Copy this file AND the ELRSChat folder to /SCRIPTS/TOOLS/.
 +-- Same r13-capable module firmware; no changes to RF or normal RC.
@@ -1443,10 +1507,12 @@ index 00000000..6e3050d8
 +return {init=init,run=run}
 diff --git a/src/lua/ELRSChat/r16/common.lua b/src/lua/ELRSChat/r16/common.lua
 new file mode 100644
-index 00000000..e23743b8
+index 00000000..a9c9fead
 --- /dev/null
 +++ b/src/lua/ELRSChat/r16/common.lua
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,210 @@
++-- SPDX-License-Identifier: GPL-3.0-or-later
++-- ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +-- ELRS Public Chat r16. GPL-3.0-or-later.
 +-- Private per-script state; no globals shared with other Lua tools.
 +local q = ...
@@ -1657,10 +1723,12 @@ index 00000000..e23743b8
 +end
 diff --git a/src/lua/ELRSChat/r16/core.lua b/src/lua/ELRSChat/r16/core.lua
 new file mode 100644
-index 00000000..1aafa2cb
+index 00000000..1059fb21
 --- /dev/null
 +++ b/src/lua/ELRSChat/r16/core.lua
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,215 @@
++-- SPDX-License-Identifier: GPL-3.0-or-later
++-- ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +-- ELRS Public Chat r16. GPL-3.0-or-later.
 +-- Private per-script state; no globals shared with other Lua tools.
 +local q = ...
@@ -1876,10 +1944,12 @@ index 00000000..1aafa2cb
 +end
 diff --git a/src/lua/ELRSChat/r16/transport.lua b/src/lua/ELRSChat/r16/transport.lua
 new file mode 100644
-index 00000000..6389ad05
+index 00000000..d8458f66
 --- /dev/null
 +++ b/src/lua/ELRSChat/r16/transport.lua
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,171 @@
++-- SPDX-License-Identifier: GPL-3.0-or-later
++-- ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +-- ELRS Public Chat r16. GPL-3.0-or-later.
 +-- Private per-script state; no globals shared with other Lua tools.
 +local q = ...
@@ -2051,10 +2121,12 @@ index 00000000..6389ad05
 +end
 diff --git a/src/lua/ELRSChat/r16/view.lua b/src/lua/ELRSChat/r16/view.lua
 new file mode 100644
-index 00000000..21852a10
+index 00000000..1ac023c0
 --- /dev/null
 +++ b/src/lua/ELRSChat/r16/view.lua
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,173 @@
++-- SPDX-License-Identifier: GPL-3.0-or-later
++-- ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +-- ELRS Public Chat r16. GPL-3.0-or-later.
 +-- Private per-script state; no globals shared with other Lua tools.
 +local q = ...
@@ -2227,10 +2299,15 @@ index 00000000..21852a10
 +  q.logRows=math.max(1,floor((q.footerY-(q.color and 4 or 0)-q.logTop)/q.logHeight))
 +end
 diff --git a/src/src/rxtx_common.cpp b/src/src/rxtx_common.cpp
-index 6b5b10d3..11d54652 100644
+index 6b5b10d3..e4c1da61 100644
 --- a/src/src/rxtx_common.cpp
 +++ b/src/src/rxtx_common.cpp
-@@ -84,6 +84,15 @@ void deferExecutionMicros(unsigned long us, std::function<void()> f)
+@@ -1,3 +1,4 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
+ #include "targets.h"
+ #include "common.h"
+ #include "config.h"
+@@ -84,6 +85,15 @@ void deferExecutionMicros(unsigned long us, std::function<void()> f)
      DBGLN("No more deferred function slots available!");
  }
  
@@ -2247,10 +2324,11 @@ index 6b5b10d3..11d54652 100644
  {
      // execute deferred function if its time has elapsed
 diff --git a/src/src/tx_main.cpp b/src/src/tx_main.cpp
-index 34e90655..7cb54355 100644
+index 34e90655..d215ad47 100644
 --- a/src/src/tx_main.cpp
 +++ b/src/src/tx_main.cpp
-@@ -1,4 +1,7 @@
+@@ -1,4 +1,8 @@
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
  #include "rxtx_common.h"
 +#ifdef ELRS_CHAT
 +#include "ChatDevice.h" // ELRS_CHAT_RUNTIME_V3
@@ -2258,7 +2336,7 @@ index 34e90655..7cb54355 100644
  
  #include "CRSFHandset.h"
  #include "CRSFParameters.h"
-@@ -657,6 +660,9 @@ void ICACHE_RAM_ATTR nonceAdvance()
+@@ -657,6 +661,9 @@ void ICACHE_RAM_ATTR nonceAdvance()
   */
  void ICACHE_RAM_ATTR timerCallback()
  {
@@ -2268,7 +2346,7 @@ index 34e90655..7cb54355 100644
    /* If we are busy writing to EEPROM (committing config changes) then we just advance the nonces, i.e. no SPI traffic */
    if (commitInProgress)
    {
-@@ -713,6 +719,10 @@ void ICACHE_RAM_ATTR timerCallback()
+@@ -713,6 +720,10 @@ void ICACHE_RAM_ATTR timerCallback()
  
  static void UARTdisconnected()
  {
@@ -2279,7 +2357,7 @@ index 34e90655..7cb54355 100644
    hwTimer::stop();
    setConnectionState(noCrossfire);
    // Since not going from connected -> disconnected, set LQ=0 to make sure the handset knows we stopped TXing when it comes back
-@@ -721,6 +731,10 @@ static void UARTdisconnected()
+@@ -721,6 +732,10 @@ static void UARTdisconnected()
  
  static void UARTconnected()
  {
@@ -2290,7 +2368,7 @@ index 34e90655..7cb54355 100644
    webserverPreventAutoStart = true;
    rfModeLastChangedMS = millis(); // force syncspam on first packets
  
-@@ -771,6 +785,9 @@ static void ChangeRadioParams()
+@@ -771,6 +786,9 @@ static void ChangeRadioParams()
  
  void ModelUpdateReq()
  {
@@ -2300,7 +2378,7 @@ index 34e90655..7cb54355 100644
    // Force synspam with the current rate parameters in case already have a connection established
    if (config.SetModelId(crsfTransmitter.modelId))
    {
-@@ -827,6 +844,9 @@ static void CheckConfigChangePending()
+@@ -827,6 +845,9 @@ static void CheckConfigChangePending()
  
  bool ICACHE_RAM_ATTR RXdoneISR(SX12xxDriverCommon::rx_status const status)
  {
@@ -2310,7 +2388,7 @@ index 34e90655..7cb54355 100644
    // busyTransmitting is required here to prevent accidental rxdone IRQs due to interference triggering RXdoneISR.
    if (LqTQly.currentIsSet() || busyTransmitting)
    {
-@@ -840,6 +860,9 @@ bool ICACHE_RAM_ATTR RXdoneISR(SX12xxDriverCommon::rx_status const status)
+@@ -840,6 +861,9 @@ bool ICACHE_RAM_ATTR RXdoneISR(SX12xxDriverCommon::rx_status const status)
  
  void ICACHE_RAM_ATTR TXdoneISR()
  {
@@ -2320,7 +2398,7 @@ index 34e90655..7cb54355 100644
    if (!busyTransmitting)
    {
      return; // Already finished transmission and do not call HandleFHSS() a second time, which may hop the frequency!
-@@ -1004,6 +1027,9 @@ void SendUIDOverMSP()
+@@ -1004,6 +1028,9 @@ void SendUIDOverMSP()
  
  static void EnterBindingMode()
  {
@@ -2330,7 +2408,7 @@ index 34e90655..7cb54355 100644
    if (InBindingMode)
        return;
  
-@@ -1405,6 +1431,10 @@ static void checkSendLinkStatsToHandset(uint32_t now)
+@@ -1405,6 +1432,10 @@ static void checkSendLinkStatsToHandset(uint32_t now)
    }
  }
  
@@ -2341,7 +2419,7 @@ index 34e90655..7cb54355 100644
  void setup()
  {
    if (setupHardwareFromOptions())
-@@ -1471,6 +1501,9 @@ void setup()
+@@ -1471,6 +1502,9 @@ void setup()
        hwTimer::init(nullptr, timerCallback);
        setConnectionState(noCrossfire);
      }
@@ -2351,7 +2429,7 @@ index 34e90655..7cb54355 100644
    }
    else
    {
-@@ -1496,6 +1529,14 @@ void setup()
+@@ -1496,6 +1530,14 @@ void setup()
  void loop()
  {
    uint32_t now = millis();
@@ -2368,10 +2446,12 @@ index 34e90655..7cb54355 100644
  
 diff --git a/src/test/test_elrs_chat/test_chat.cpp b/src/test/test_elrs_chat/test_chat.cpp
 new file mode 100644
-index 00000000..3d1553e4
+index 00000000..e5b5a8e3
 --- /dev/null
 +++ b/src/test/test_elrs_chat/test_chat.cpp
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,81 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ELRSChat modifications: 2026-09-19. See NOTICE.md in the repository root.
 +#include <unity.h>
 +#include "ChatMailbox.h"
 +#include "ChatSession.h"
