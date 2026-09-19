@@ -1,4 +1,7 @@
 #include "TXModuleEndpoint.h"
+#ifdef ELRS_CHAT
+#include "ChatDevice.h"
+#endif
 
 #include "rxtx_intf.h"
 #include "CRSFRouter.h"
@@ -27,6 +30,9 @@ void TXModuleEndpoint::begin()
     }
 #endif
     registerParameters();
+#ifdef ELRS_CHAT
+    registerParameter(&chatParameter);
+#endif
 }
 
 bool TXModuleEndpoint::handleRaw(const crsf_header_t *message)
@@ -41,6 +47,9 @@ bool TXModuleEndpoint::handleRaw(const crsf_header_t *message)
 
 void TXModuleEndpoint::handleMessage(const crsf_header_t *message)
 {
+#ifdef ELRS_CHAT
+    if (chatDeviceHandleMessage(message)) return;
+#endif
     const crsf_frame_type_e packetType = message->type;
 
     const auto extMessage = (crsf_ext_header_t *)message;

@@ -84,6 +84,15 @@ void deferExecutionMicros(unsigned long us, std::function<void()> f)
     DBGLN("No more deferred function slots available!");
 }
 
+#if defined(ELRS_CHAT) && defined(TARGET_TX)
+bool hasDeferredFunction()
+{
+    for (int i = 0; i < maxDeferredFunctions; ++i)
+        if (deferred[i].function != nullptr) return true;
+    return false;
+}
+#endif
+
 void executeDeferredFunction(unsigned long now)
 {
     // execute deferred function if its time has elapsed

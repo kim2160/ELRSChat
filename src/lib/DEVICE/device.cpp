@@ -42,6 +42,44 @@ static SemaphoreHandle_t semCore0Complete = nullptr;
 #define CURRENT_CORE -1
 #endif
 
+#if defined(ELRS_CHAT) && defined(TARGET_TX)
+#include "DevicePause.h"
+static elrs::DevicePause devicePause;
+bool devicesPauseExcept(const device_t *const *keep, uint8_t count)
+{
+    if (deviceCount > 16) return false;
+    uint32_t mask = 0;
+    if (keep) {
+        for (uint8_t i = 0; i < deviceCount; ++i) {
+            bool pause = true;
+            for (uint8_t j = 0; j < count; ++j)
+                if (uiDevices[i].device == keep[j]) pause = false;
+            if (pause) mask |= uint32_t(1) << i;
+        }
+    }
+    const uint32_t ticket = devicePause.request(mask);
+#if MULTICORE
+    devicesTriggerEvent(EVENT_ALL);
+    const uint32_t started = millis();
+    while (!devicePause.acknowledged(ticket)) {
+        if (millis() - started >= 100) {
+            devicePause.request(0);
+            devicePause.boundary(1);
+            devicesTriggerEvent(EVENT_ALL);
+            return false;
+        }
+        delay(1);
+    }
+    devicePause.boundary(1);
+#else
+    (void)ticket;
+    devicePause.boundary(0);
+#endif
+    if (!keep) devicesTriggerEvent(EVENT_ALL);
+    return true;
+}
+#endif
+
 void devicesRegister(device_affinity_t *devices, uint8_t count)
 {
     uiDevices = devices;
@@ -139,6 +177,9 @@ static int _devicesUpdate(unsigned long now)
 {
     const int32_t core = CURRENT_CORE;
     const int32_t coreMulti = (core == -1) ? 0 : core;
+#if defined(ELRS_CHAT) && defined(TARGET_TX)
+    devicePause.boundary(coreMulti);
+#endif
 
     bool newModelMatch = connectionHasModelMatch && teamraceHasModelMatch;
     uint32_t events = eventFired[coreMulti];
@@ -150,6 +191,9 @@ static int _devicesUpdate(unsigned long now)
     {
         for(size_t i=0 ; i<deviceCount ; i++)
         {
+#if defined(ELRS_CHAT) && defined(TARGET_TX)
+            if (devicePause.paused(coreMulti, i)) continue;
+#endif
             if ((uiDevices[i].core == core || core == -1) && (uiDevices[i].device->event && (uiDevices[i].device->subscribe & events) != 0))
             {
                 int delay = (uiDevices[i].device->event)();
@@ -164,6 +208,9 @@ static int _devicesUpdate(unsigned long now)
     int smallest_delay = DURATION_NEVER;
     for(size_t i=0 ; i<deviceCount ; i++)
     {
+#if defined(ELRS_CHAT) && defined(TARGET_TX)
+        if (devicePause.paused(coreMulti, i)) continue;
+#endif
         if ((uiDevices[i].core == core || core == -1) && uiDevices[i].device->timeout)
         {
             int delay = deviceTimeout[i] == 0xFFFFFFFF ? DURATION_NEVER : (int)(deviceTimeout[i]-now);

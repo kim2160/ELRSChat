@@ -645,7 +645,11 @@ void ICACHE_RAM_ATTR LR1121Driver::TXnb(uint8_t *data, const bool sendGeminiBuff
         }
     }
 
+#ifdef ELRS_CHAT
+    WORD_ALIGNED_ATTR uint8_t outBuffer[64] = {0};
+#else
     WORD_ALIGNED_ATTR uint8_t outBuffer[32] = {0};
+#endif
     const uint8_t length = PayloadLength + 3; // 3 extra zero bytes for the 24-bit timeout
     codec->encode(outBuffer, data, PayloadLength);
     if (sendGeminiBuffer)

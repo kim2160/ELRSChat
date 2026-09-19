@@ -115,3 +115,7 @@ void devicesTriggerEvent(uint32_t events);
  * This destroys the FreeRTOS task running on the alternate core(s).
  */
 void devicesStop();
+#if defined(ELRS_CHAT) && defined(TARGET_TX)
+// Call only from the loop core outside device callbacks. Bounded to 100 ms.
+bool devicesPauseExcept(const device_t *const *keep, uint8_t count);
+#endif

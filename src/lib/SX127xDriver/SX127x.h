@@ -75,6 +75,9 @@ public:
     /////////////Non-blocking RX related Functions///////////////
     void RXnb();
 
+#ifdef ELRS_CHAT
+    void ApplyPendingPower() { CommitOutputPower(); }
+#endif
 private:
     // constant used for no power change pending
     // must not be a valid power register value

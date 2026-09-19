@@ -43,6 +43,9 @@ public:
     void GetLastPacketStats();
     void CheckForSecondPacket();
 
+#ifdef ELRS_CHAT
+    void ApplyPendingPower() { CommitOutputPower(); }
+#endif
 private:
     // constant used for no power change pending
     // must not be a valid power register value

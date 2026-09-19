@@ -64,6 +64,9 @@ public:
     int WriteUpdateBytes(const uint8_t *bytes, uint32_t size);
     int EndUpdate();
 
+#ifdef ELRS_CHAT
+    void ApplyPendingPower() { CommitOutputPower(); }
+#endif
 private:
     // constant used for no power change pending
     // must not be a valid power register value
@@ -82,8 +85,13 @@ private:
     lr11xx_RadioOperatingModes_t fallBackMode;
     BufferCodec *codec;
 
+#ifdef ELRS_CHAT
+    WORD_ALIGNED_ATTR uint8_t rx_buf[64] = {};
+    WORD_ALIGNED_ATTR uint8_t rx2_buf[64] = {};
+#else
     WORD_ALIGNED_ATTR uint8_t rx_buf[32] = {};
     WORD_ALIGNED_ATTR uint8_t rx2_buf[32] = {};
+#endif
 
     bool CheckVersion(SX12XX_Radio_Number_t radioNumber);
 

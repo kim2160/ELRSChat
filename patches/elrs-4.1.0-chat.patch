@@ -1,0 +1,2453 @@
+diff --git a/src/include/deferred.h b/src/include/deferred.h
+index 35d3e0c7..a0fe6852 100644
+--- a/src/include/deferred.h
++++ b/src/include/deferred.h
+@@ -4,6 +4,9 @@
+ 
+ void deferExecutionMicros(unsigned long us, std::function<void()> f);
+ void executeDeferredFunction(unsigned long now);
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++bool hasDeferredFunction();
++#endif
+ 
+ static inline void deferExecutionMillis(unsigned long ms, std::function<void()> f)
+ {
+diff --git a/src/lib/DEVICE/DevicePause.h b/src/lib/DEVICE/DevicePause.h
+new file mode 100644
+index 00000000..6715d0d2
+--- /dev/null
++++ b/src/lib/DEVICE/DevicePause.h
+@@ -0,0 +1,32 @@
++#pragma once
++#include <stdint.h>
++
++namespace elrs {
++// The owner core publishes a mask. The other core acknowledges it only at a
++// callback-batch boundary, after its previous callbacks have completed.
++// Normal operation requires one lock-free load, not a blocking mutex.
++class DevicePause {
++public:
++    uint32_t request(uint32_t mask) {
++        const uint32_t ticket = __atomic_load_n(&requested_, __ATOMIC_RELAXED) + 1;
++        __atomic_store_n(&mask_, mask, __ATOMIC_RELAXED);
++        __atomic_store_n(&requested_, ticket, __ATOMIC_RELEASE);
++        return ticket;
++    }
++    void boundary(unsigned core) {
++        const uint32_t ticket = __atomic_load_n(&requested_, __ATOMIC_ACQUIRE);
++        if (localTicket_[core] == ticket) return;
++        const uint32_t mask = __atomic_load_n(&mask_, __ATOMIC_RELAXED);
++        if (__atomic_load_n(&requested_, __ATOMIC_ACQUIRE) != ticket) return;
++        local_[core] = mask; localTicket_[core] = ticket;
++        if (core == 0) __atomic_store_n(&acknowledged_, ticket, __ATOMIC_RELEASE);
++    }
++    bool acknowledged(uint32_t ticket) const {
++        return __atomic_load_n(&acknowledged_, __ATOMIC_ACQUIRE) == ticket;
++    }
++    bool paused(unsigned core, unsigned device) const { return local_[core] & (uint32_t(1) << device); }
++private:
++    uint32_t requested_ = 0, acknowledged_ = 0, mask_ = 0;
++    uint32_t local_[2] = {}, localTicket_[2] = {};
++};
++}
+diff --git a/src/lib/DEVICE/device.cpp b/src/lib/DEVICE/device.cpp
+index 6a11d1d8..36de282e 100644
+--- a/src/lib/DEVICE/device.cpp
++++ b/src/lib/DEVICE/device.cpp
+@@ -42,6 +42,44 @@ static SemaphoreHandle_t semCore0Complete = nullptr;
+ #define CURRENT_CORE -1
+ #endif
+ 
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++#include "DevicePause.h"
++static elrs::DevicePause devicePause;
++bool devicesPauseExcept(const device_t *const *keep, uint8_t count)
++{
++    if (deviceCount > 16) return false;
++    uint32_t mask = 0;
++    if (keep) {
++        for (uint8_t i = 0; i < deviceCount; ++i) {
++            bool pause = true;
++            for (uint8_t j = 0; j < count; ++j)
++                if (uiDevices[i].device == keep[j]) pause = false;
++            if (pause) mask |= uint32_t(1) << i;
++        }
++    }
++    const uint32_t ticket = devicePause.request(mask);
++#if MULTICORE
++    devicesTriggerEvent(EVENT_ALL);
++    const uint32_t started = millis();
++    while (!devicePause.acknowledged(ticket)) {
++        if (millis() - started >= 100) {
++            devicePause.request(0);
++            devicePause.boundary(1);
++            devicesTriggerEvent(EVENT_ALL);
++            return false;
++        }
++        delay(1);
++    }
++    devicePause.boundary(1);
++#else
++    (void)ticket;
++    devicePause.boundary(0);
++#endif
++    if (!keep) devicesTriggerEvent(EVENT_ALL);
++    return true;
++}
++#endif
++
+ void devicesRegister(device_affinity_t *devices, uint8_t count)
+ {
+     uiDevices = devices;
+@@ -139,6 +177,9 @@ static int _devicesUpdate(unsigned long now)
+ {
+     const int32_t core = CURRENT_CORE;
+     const int32_t coreMulti = (core == -1) ? 0 : core;
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++    devicePause.boundary(coreMulti);
++#endif
+ 
+     bool newModelMatch = connectionHasModelMatch && teamraceHasModelMatch;
+     uint32_t events = eventFired[coreMulti];
+@@ -150,6 +191,9 @@ static int _devicesUpdate(unsigned long now)
+     {
+         for(size_t i=0 ; i<deviceCount ; i++)
+         {
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++            if (devicePause.paused(coreMulti, i)) continue;
++#endif
+             if ((uiDevices[i].core == core || core == -1) && (uiDevices[i].device->event && (uiDevices[i].device->subscribe & events) != 0))
+             {
+                 int delay = (uiDevices[i].device->event)();
+@@ -164,6 +208,9 @@ static int _devicesUpdate(unsigned long now)
+     int smallest_delay = DURATION_NEVER;
+     for(size_t i=0 ; i<deviceCount ; i++)
+     {
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++        if (devicePause.paused(coreMulti, i)) continue;
++#endif
+         if ((uiDevices[i].core == core || core == -1) && uiDevices[i].device->timeout)
+         {
+             int delay = deviceTimeout[i] == 0xFFFFFFFF ? DURATION_NEVER : (int)(deviceTimeout[i]-now);
+diff --git a/src/lib/DEVICE/device.h b/src/lib/DEVICE/device.h
+index 198b234b..24cfa6cb 100644
+--- a/src/lib/DEVICE/device.h
++++ b/src/lib/DEVICE/device.h
+@@ -115,3 +115,7 @@ void devicesTriggerEvent(uint32_t events);
+  * This destroys the FreeRTOS task running on the alternate core(s).
+  */
+ void devicesStop();
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++// Call only from the loop core outside device callbacks. Bounded to 100 ms.
++bool devicesPauseExcept(const device_t *const *keep, uint8_t count);
++#endif
+diff --git a/src/lib/ElrsChat/ChatDevice.cpp b/src/lib/ElrsChat/ChatDevice.cpp
+new file mode 100644
+index 00000000..b1bfadc0
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatDevice.cpp
+@@ -0,0 +1,319 @@
++#include "targets.h"
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++#include "ChatDevice.h"
++#include "ChatEngine.h"
++#include "ChatSession.h"
++#include "ChatProfile.h"
++#include "OTA.h"
++#include "common.h"
++#include "rxtx_intf.h"
++#include "FHSS.h"
++#include "POWERMGNT.h"
++#include "CRSFRouter.h"
++#include "ChatMailbox.h"
++#include <new>
++#include "device.h"
++#if !defined(RADIO_LR1121)
++#include "RFAMP_hal.h"
++extern RFAMP_hal RFAMP;
++#endif
++#if defined(PLATFORM_ESP8266)
++#include <user_interface.h>
++#endif
++
++#ifndef CHAT_FREQUENCY_HZ
++#define CHAT_FREQUENCY_HZ 0
++#endif
++#ifndef CHAT_POWER
++#define CHAT_POWER 0
++#endif
++#ifndef CHAT_PROFILE_ID
++#if defined(RADIO_SX128X)
++#define CHAT_PROFILE_ID 1
++#elif defined(RADIO_SX127X)
++#define CHAT_PROFILE_ID 2
++#elif CHAT_FREQUENCY_HZ >= 2401000000UL
++#define CHAT_PROFILE_ID 1
++#else
++#define CHAT_PROFILE_ID 2
++#endif
++#endif
++
++bool chatDeviceScheduled = false;
++namespace {
++chat::Mailbox mailbox;
++struct Command { uint8_t length; uint8_t bytes[chat::Mailbox::MaxCommand]; };
++struct RadioEvent { uint8_t bytes[chat::PacketSize]; int8_t rssi, snr; };
++struct Runtime {
++    chat::Engine engine;
++    chat::Queue<Command, 4> commands;
++    chat::Queue<RadioEvent, 4> events;
++    volatile bool txDone = false;
++    bool disconnected = false;
++    uint32_t lastCommand;
++    Runtime(chat::Port &port, const chat::Profile &profile, const uint8_t *sender, uint32_t now)
++        : engine(port, profile, sender, port.random32()), lastCommand(now) {}
++};
++// Handset callbacks and loop are on the same core. Only events/txDone cross ISR.
++Runtime *runtime = nullptr;
++bool available = false, updating = false;
++chat::Profile profile;
++chat::Result entryResult = chat::Result::None;
++bool supportedProfile(chat::Profile &candidate);
++bool configureRadio();
++void stopRadio();
++class RadioSessionPort : public chat::SessionPort {
++public:
++    chat::Result suspendRc() override {
++        auto candidate = profile;
++        if (updating || !supportedProfile(candidate)) return chat::Result::Unsupported;
++        return chatRcSuspend();
++    }
++    bool configureChat() override { return configureRadio(); }
++    void stopChat() override { stopRadio(); }
++    void restoreRc(bool resume) override { chatRcRestore(resume); }
++} sessionPort;
++chat::Session session(sessionPort);
++
++// SPI control is on the same core that attached the RF ISR in setup().
++// Do not invoke engine or CRSF routing from an RF interrupt.
++bool ICACHE_RAM_ATTR receiveISR(SX12xxDriverCommon::rx_status status) {
++    if (!chatDeviceActive()) return false;
++    if (status != SX12xxDriverCommon::SX12XX_RX_OK) return false;
++    Radio.GetLastPacketStats();
++    RadioEvent event;
++    memcpy(event.bytes, Radio.RXdataBuffer, chat::PacketSize);
++    event.rssi = int8_t(Radio.LastPacketRSSI); event.snr = int8_t(Radio.LastPacketSNRRaw);
++    runtime->events.push(event);
++    return true;
++}
++void ICACHE_RAM_ATTR transmitISR() {
++    if (chatDeviceActive()) runtime->txDone = true;
++}
++// Caller holds the RF interrupt critical section. Preserve queued RX events.
++void idleRadio() {
++    Radio.SetTxIdleMode();
++#if defined(RADIO_SX128X)
++    Radio.ClearIrqStatus(SX1280_IRQ_RADIO_ALL, SX12XX_Radio_All);
++#elif defined(RADIO_SX127X)
++    Radio.ClearIrqFlags(SX12XX_Radio_All);
++#else
++    Radio.ClearIrqStatus(SX12XX_Radio_All);
++#endif
++}
++class HardwarePort : public chat::Port {
++public:
++    chat::Result selectProfile(chat::Profile &candidate) override {
++        if (!available || updating || connectionState >= wifiUpdate) return chat::Result::Unsupported;
++        if (session.active()) return chat::Result::Busy;
++        if (!supportedProfile(candidate)) return chat::Result::Unsupported;
++        profile = candidate; // RAM only. The RC configuration is unchanged.
++        return chat::Result::None;
++    }
++    bool startReceive() override {
++        if (!available || updating || connectionState >= wifiUpdate) {
++            entryResult = chat::Result::Unsupported;
++            return false;
++        }
++        entryResult = session.enter();
++        if (entryResult != chat::Result::None) return false;
++        noInterrupts(); Radio.RXnb(); interrupts();
++        return true;
++    }
++    chat::Result receiveFailure() const override { return entryResult; }
++    void endSession() override { session.leave(!updating); }
++    chat::Mode mode() const override {
++        if (!available || updating) return chat::Mode::Unavailable;
++        return session.active() ? chat::Mode::Chat : chat::Mode::Normal;
++    }
++    void standby() override {
++        if (session.active()) stopRadio();
++    }
++    bool channelClear() override {
++        noInterrupts();
++#if defined(RADIO_SX128X)
++        const int rssi = Radio.GetRssiInst(SX12XX_Radio_1);
++#elif defined(RADIO_SX127X)
++        const int rssi = Radio.GetCurrRSSI(SX12XX_Radio_1);
++#else
++        Radio.StartRssiInst(SX12XX_Radio_1);
++        const int rssi = Radio.GetRssiInst(SX12XX_Radio_1);
++#endif
++        interrupts();
++        // Collision avoidance heuristic, NOT a regulatory LBT implementation.
++        return rssi < -85;
++    }
++    bool transmit(const uint8_t *packet) override {
++        if (!available || !session.active() || updating) return false;
++        noInterrupts();
++        idleRadio();
++        Radio.TXnb(const_cast<uint8_t *>(packet), false, nullptr, SX12XX_Radio_1);
++        interrupts();
++        return true;
++    }
++    uint32_t random32() override {
++#if defined(PLATFORM_ESP32)
++        return esp_random();
++#else
++        return os_random();
++#endif
++    }
++    void reply(const uint8_t *bytes, uint8_t n) override { mailbox.reply(bytes, n); }
++} port;
++
++bool supportedProfile(chat::Profile &candidate) {
++    // This fixed-channel waveform has not been qualified for stock regulatory
++    // profiles. Inclusion of the code must not silently enable RF operation.
++#if !defined(CHAT_EXPERIMENTAL_RF) || !CHAT_EXPERIMENTAL_RF || defined(Regulatory_Domain_EU_CE_2400)
++    return false;
++#endif
++    // Only a single RF chip is supported in v1. Reject Gemini/dual rather than
++    // silently using an unknown antenna/power path.
++    if (!available || GPIO_PIN_NSS_2 != UNDEF_PIN) return false;
++#if defined(RADIO_SX128X)
++    const bool sub = false, band2400 = true;
++#elif defined(RADIO_SX127X)
++    const bool sub = true, band2400 = false;
++#else
++    const bool sub = true, band2400 = POWER_OUTPUT_VALUES_DUAL != nullptr;
++#endif
++    return chat::selectSupportedProfile(candidate, POWERMGNT::getMinPower(),
++        POWERMGNT::getMaxPower(), sub, band2400);
++}
++void stopRadio() {
++    if (!available || connectionState >= wifiUpdate) return;
++    noInterrupts();
++    idleRadio();
++#if !defined(RADIO_LR1121)
++    RFAMP.TXRXdisable();
++#endif
++    if (runtime) { runtime->events.clear(); runtime->txDone = false; }
++    interrupts();
++}
++bool configureRadio() {
++    const bool sub = profile.frequency < 1000000000UL;
++    stopRadio();
++    noInterrupts();
++    Radio.RXdoneCallback = receiveISR; Radio.TXdoneCallback = transmitISR;
++    FHSSusePrimaryFreqBand = sub;
++    FHSSuseDualBand = false;
++    POWERMGNT::setPower(PowerLevels_e(profile.power));
++    if (POWERMGNT::currPower() != profile.power) { interrupts(); return false; }
++    const uint32_t freq = FREQ_HZ_TO_REG_VAL(profile.frequency);
++#if defined(RADIO_SX128X)
++    Radio.Config(SX1280_LORA_BW_0800, SX1280_LORA_SF7, SX1280_LORA_CR_4_7,
++                 freq, 12, false, chat::PacketSize, 0, 0, RadioBandMod::LORA_2G4);
++#elif defined(RADIO_SX127X)
++    Radio.Config(SX127x_BW_500_00_KHZ, SX127x_SF_9, SX127x_CR_4_7,
++                 freq, 12, 0x12, false, chat::PacketSize);
++#else
++    Radio.Config(sub ? LR11XX_RADIO_LORA_BW_500 : LR11XX_RADIO_LORA_BW_800,
++                 sub ? LR11XX_RADIO_LORA_SF9 : LR11XX_RADIO_LORA_SF7,
++                 LR11XX_RADIO_LORA_CR_4_7, freq, 12, false, chat::PacketSize,
++                 sub ? RadioBandMod::LORA_900 : RadioBandMod::LORA_2G4, 0, 0);
++#endif
++    Radio.ApplyPendingPower();
++    interrupts();
++    stopRadio();
++    return true;
++}
++}
++
++stringParameter chatParameter = {
++    {chat::Mailbox::name(), crsf_value_type_e(CRSF_STRING | CRSF_FIELD_HIDDEN), 0, 0}, mailbox.value
++};
++
++void chatDeviceBegin(bool radioAvailable) {
++    available = radioAvailable && GPIO_PIN_SCK != UNDEF_PIN;
++    profile.id = CHAT_PROFILE_ID; profile.frequency = CHAT_FREQUENCY_HZ; profile.power = CHAT_POWER;
++}
++void chatDeviceDisconnected() {
++    if (runtime) runtime->disconnected = true;
++}
++static void sendParameterFrame(uint8_t type, const uint8_t *payload, uint8_t n) {
++    uint8_t bytes[64];
++    memcpy(bytes + sizeof(crsf_header_t), payload, n);
++    crsfRouter.SetExtendedHeaderAndCrc(reinterpret_cast<crsf_ext_header_t *>(bytes),
++        crsf_frame_type_e(type), n + 2, CRSF_ADDRESS_ELRS_LUA, CRSF_ADDRESS_CRSF_TRANSMITTER);
++    crsfRouter.deliverMessageTo(CRSF_ADDRESS_ELRS_LUA, reinterpret_cast<crsf_header_t *>(bytes));
++}
++static bool handleParameter(const crsf_header_t *frame) {
++    if (frame->frame_size < 6 || frame->frame_size > 62) return false;
++    const uint8_t *payload = reinterpret_cast<const uint8_t *>(frame) + sizeof(crsf_header_t);
++    const uint8_t length = frame->frame_size - 2;
++    mailbox.field = chatParameter.common.id;
++    if (!mailbox.addressed(frame->type, payload, length)) return false;
++    if (frame->type == chat::Mailbox::Read) {
++        if (length != 4) return true;
++        uint8_t out[60];
++        const uint8_t n = mailbox.read(payload[3], crsfRouter.getConnectorMaxPacketSize(CRSF_ADDRESS_ELRS_LUA), out);
++        if (n) sendParameterFrame(chat::Mailbox::Entry, out, n);
++        return true;
++    }
++    Command command;
++    command.length = mailbox.request(payload, length, command.bytes);
++    if (!command.length || updating) return true;
++    if (!runtime) {
++        uint8_t sender[8] = {};
++#if defined(PLATFORM_ESP32)
++        const uint64_t mac = ESP.getEfuseMac(); memcpy(sender, &mac, 6);
++#else
++        wifi_get_macaddr(STATION_IF, sender);
++#endif
++        sender[6] = 'E'; sender[7] = 'C';
++        runtime = new (std::nothrow) Runtime(port, profile, sender, millis());
++        if (!runtime) return true; // No ACK: the Lua transport times out safely.
++        chatDeviceScheduled = true;
++    }
++    if (runtime->commands.push(command)) {
++        runtime->lastCommand = millis();
++        memcpy(mailbox.value, payload + 3, length - 3);
++        sendParameterFrame(chat::Mailbox::Write, payload, length);
++    }
++    return true;
++}
++bool chatDeviceHandleMessage(const crsf_header_t *frame) {
++    // Called only for addressed extended messages, never on the raw RC path.
++    if (handleParameter(frame)) return true;
++    if (!chatDeviceActive()) return false;
++    const auto ext = reinterpret_cast<const crsf_ext_header_t *>(frame);
++    // Preserve model selection and cancel chat before returning to that model.
++    if (frame->type != CRSF_FRAMETYPE_COMMAND || frame->frame_size < 7
++        || ext->payload[0] != CRSF_COMMAND_SUBCMD_RX
++        || ext->payload[1] != CRSF_COMMAND_MODEL_SELECT_ID) return true;
++    chatDeviceDisconnected();
++    return false;
++}
++void chatDeviceLoop(uint32_t now) {
++    if (!runtime) return;
++    auto &engine = runtime->engine;
++    if (connectionState >= wifiUpdate) {
++        updating = true; available = false;
++        engine.disconnect(); // Never revive an updater's RF driver.
++    }
++    if (runtime->disconnected || (session.active() && isArmed)) {
++        runtime->disconnected = false; engine.disconnect();
++    }
++    bool done;
++    noInterrupts(); done = runtime->txDone; runtime->txDone = false; interrupts();
++    if (done) engine.txDone();
++    for (uint8_t i = 0; i < 4; ++i) {
++        RadioEvent event;
++        noInterrupts(); const bool have = runtime->events.pop(event); interrupts();
++        if (!have) break;
++        engine.received(event.bytes, event.rssi, event.snr);
++    }
++    Command command;
++    for (uint8_t i = 0; i < 4 && runtime->commands.pop(command); ++i)
++        if (!updating) engine.command(command.bytes, command.length, now);
++    engine.tick(now);
++    // The radio has already left chat and its callbacks have been restored.
++    // Expire all application buffers after the Lua tool goes away.
++    if (!session.active() && engine.state() == chat::State::Idle && now - runtime->lastCommand >= 6000) {
++        Runtime *old = runtime;
++        noInterrupts(); runtime = nullptr; chatDeviceScheduled = false; interrupts();
++        delete old;
++        strcpy(mailbox.value, "v1");
++    }
++}
++#endif
+diff --git a/src/lib/ElrsChat/ChatDevice.h b/src/lib/ElrsChat/ChatDevice.h
+new file mode 100644
+index 00000000..b6de7ede
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatDevice.h
+@@ -0,0 +1,19 @@
++#pragma once
++#include "targets.h"
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++#include "crsf_protocol.h"
++#include "ChatProtocol.h"
++struct stringParameter;
++extern volatile bool chatRcPaused;
++extern bool chatHandsetPresent;
++extern bool chatHandsetNeedsModel;
++extern bool chatDeviceScheduled;
++extern stringParameter chatParameter;
++inline bool ICACHE_RAM_ATTR chatDeviceActive() { return chatRcPaused; }
++chat::Result chatRcSuspend();
++void chatRcRestore(bool resume);
++void chatDeviceBegin(bool radioAvailable);
++void chatDeviceLoop(uint32_t now);
++bool chatDeviceHandleMessage(const crsf_header_t *frame);
++void chatDeviceDisconnected();
++#endif
+diff --git a/src/lib/ElrsChat/ChatEngine.cpp b/src/lib/ElrsChat/ChatEngine.cpp
+new file mode 100644
+index 00000000..614772de
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatEngine.cpp
+@@ -0,0 +1,198 @@
++#include "ChatEngine.h"
++#include <string.h>
++
++namespace chat {
++static bool due(uint32_t now, uint32_t when) { return int32_t(now - when) >= 0; }
++Engine::Engine(Port &port, const Profile &profile, const uint8_t *sender, uint32_t boot)
++    : port_(port), profile_(profile), boot_(boot) { memcpy(sender_, sender, 8); }
++
++void Engine::status(uint32_t client, uint16_t req, Result replyResult) {
++    uint8_t out[42] = {'C', 'H', LocalVersion, uint8_t(Op::Status)};
++    put32(out + 4, client); put16(out + 8, req);
++    put32(out + 10, boot_); memcpy(out + 14, sender_, 8);
++    out[22] = uint8_t(state_); out[23] = uint8_t(replyResult);
++    out[24] = MaxText; out[25] = profile_.id;
++    put32(out + 26, profile_.frequency); out[30] = profile_.power;
++    put16(out + 31, request_); put16(out + 33, rxCount_ ? rx_[rxHead_].id : 0);
++    out[35] = rxCount_; put16(out + 36, dropped_);
++    put16(out + 38, highWater_);
++    out[40] = client == client_ ? 1 : 0;
++    out[41] = uint8_t(port_.mode());
++    port_.reply(out, sizeof(out));
++}
++void Engine::finish(Result result) {
++    result_ = result; used_ = total_ = 0;
++    if (stopAfterTx_ || !active_) {
++        active_ = false; stopAfterTx_ = false; state_ = State::Idle; port_.standby();
++        port_.endSession();
++    } else {
++        state_ = State::Receiving;
++        if (!port_.startReceive()) {
++            active_ = false; state_ = State::Idle; result_ = Result::RadioError;
++            port_.standby(); port_.endSession();
++        }
++    }
++}
++void Engine::stop(Result result) {
++    active_ = false;
++    if (state_ == State::Transmitting) {
++        // An RF packet already started cannot be reported as cancelled/not sent.
++        stopAfterTx_ = true;
++        return;
++    }
++    finish(result);
++}
++void Engine::disconnect() { stop(Result::Expired); }
++
++void Engine::command(const uint8_t *p, uint8_t n, uint32_t now) {
++    if (n < LocalHeader || p[0] != 'C' || p[1] != 'H' || p[2] != LocalVersion) return;
++    const Op op = Op(p[3]);
++    const uint32_t client = get32(p + 4);
++    const uint16_t req = get16(p + 8);
++    if (!client) return;
++    const uint8_t *data = p + LocalHeader;
++    const uint8_t len = n - LocalHeader;
++    // Expire stale sessions, but do not launch RF before processing an Exit.
++    expire(now);
++    if (op == Op::Enter && (len == 0 || len == 5)) {
++        Profile requested = profile_;
++        if (len) {
++            // Lua uses integer kHz: exact even with EdgeTX int32/float32.
++            const uint32_t khz = get32(data);
++            if (!khz || khz > UINT32_MAX / 1000 || data[4] > 7) {
++                status(client, req, Result::Invalid); return;
++            }
++            requested.frequency = khz * 1000; requested.power = data[4];
++        }
++        if (client != client_) {
++            if (active_ || state_ == State::Transmitting) { status(client, req); return; }
++            client_ = client; highWater_ = request_ = 0; result_ = Result::None;
++        }
++        if (len && (active_ || state_ == State::Transmitting)
++            && (requested.frequency != profile_.frequency || requested.power != profile_.power)) {
++            status(client, req, Result::Busy); return; // Never retune a live session.
++        }
++        if (!active_ && state_ != State::Transmitting) {
++            if (len) {
++                const Result selected = port_.selectProfile(requested);
++                if (selected != Result::None) { result_ = selected; status(client, req); return; }
++                if (requested.frequency != profile_.frequency || requested.id != profile_.id) {
++                    // Never label pending records from an old channel as new arrivals.
++                    rxHead_ = rxCount_ = 0; seenCount_ = seenPos_ = 0;
++                }
++                profile_ = requested;
++            }
++            if (!profile_.frequency) result_ = Result::NoProfile;
++            else if (!port_.startReceive()) result_ = port_.receiveFailure();
++            else { active_ = true; state_ = State::Receiving; result_ = Result::None; }
++        }
++        lease_ = now;
++        status(client, req); return;
++    }
++    if (op == Op::Poll && !len) {
++        if (client == client_ && active_) lease_ = now;
++        status(client, req); return;
++    }
++    if (client != client_) return;
++    // Only an explicit Enter can re-enable RF after lease expiry.
++    if (op == Op::Exit && !len) { stop(Result::Cancelled); status(client, req); return; }
++    if (active_) lease_ = now;
++    if (op == Op::Read && len == 1) {
++        if (!rxCount_ || rx_[rxHead_].id != req || data[0] >= RecordSize) return;
++        const uint8_t offset = data[0];
++        const uint8_t count = RecordSize - offset > ChunkSize ? ChunkSize : RecordSize - offset;
++        uint8_t out[LocalHeader + 2 + ChunkSize] = {'C','H',LocalVersion,uint8_t(Op::Record)};
++        put32(out + 4, client); put16(out + 8, req);
++        out[10] = offset; out[11] = RecordSize;
++        memcpy(out + 12, rx_[rxHead_].bytes + offset, count);
++        port_.reply(out, LocalHeader + 2 + count); return;
++    }
++    if (op == Op::Release && !len) {
++        if (rxCount_ && rx_[rxHead_].id == req) { rxHead_ = (rxHead_ + 1) % RxCapacity; --rxCount_; }
++        return;
++    }
++    if (op == Op::Begin && len == 1) {
++        // Strictly increasing local IDs ensure a repeated Begin/Commit cannot cause another RF send.
++        if (!req || req <= highWater_) { status(client, req); return; }
++        if (!active_) { result_ = Result::Inactive; status(client, req); return; }
++        if (state_ != State::Receiving) { status(client, req); return; }
++        request_ = highWater_ = req;
++        if (!data[0] || data[0] > MaxText) { result_ = Result::Invalid; status(client, req); return; }
++        if (haveSent_ && now - lastSent_ < profile_.minIntervalMs) {
++            result_ = Result::RateLimited; status(client, req); return;
++        }
++        total_ = data[0]; used_ = 0; stageTime_ = now; state_ = State::Staging;
++        result_ = Result::Assembling; status(client, req); return;
++    }
++    if (!active_ || req != request_) { status(client, req); return; }
++    if (op == Op::Data && len >= 2 && len <= ChunkSize + 1 && state_ == State::Staging) {
++        const uint8_t offset = data[0], count = len - 1;
++        if (unsigned(offset) + count > total_) { finish(Result::Invalid); }
++        else if (offset == used_) { memcpy(staging_ + offset, data + 1, count); used_ += count; }
++        else if (offset < used_ && unsigned(offset) + count <= used_
++                 && !memcmp(staging_ + offset, data + 1, count)) { /* identical local duplicate */ }
++        else { finish(Result::Incomplete); }
++        return;
++    }
++    if (op == Op::Commit && !len) {
++        if (state_ != State::Staging) { status(client, req); return; }
++        if (used_ != total_) { finish(Result::Incomplete); status(client, req); return; }
++        Message m; memcpy(m.sender, sender_, 8);
++        m.session = boot_; m.sequence = ++seq_;
++        m.length = total_; memcpy(m.text, staging_, total_);
++        if (!encode(m, profile_.id, packet_)) finish(Result::Invalid);
++        else {
++            state_ = State::Queued; result_ = Result::Queued;
++            queuedAt_ = now; deadline_ = now + port_.random32() % 301;
++        }
++        status(client, req); return;
++    }
++    status(client, req);
++}
++void Engine::expire(uint32_t now) {
++    if (active_ && now - lease_ >= 5000) stop(Result::Expired);
++    if (state_ == State::Staging && now - stageTime_ >= 2000) finish(Result::Incomplete);
++    if (state_ == State::Queued && now - queuedAt_ >= profile_.maxQueueMs) finish(Result::Busy);
++    if (state_ == State::Transmitting && due(now, deadline_)) {
++        port_.standby();
++        finish(Result::Unknown); // Never retry when TX-done is missing.
++    }
++}
++void Engine::tick(uint32_t now) {
++    expire(now);
++    if (state_ == State::Queued) {
++        if (due(now, deadline_)) {
++            if (!port_.channelClear()) { deadline_ = now + 20 + port_.random32() % 181; return; }
++            // Transition before calling the driver; the call is made at most once for this request.
++            state_ = State::Transmitting; result_ = Result::Sending;
++            deadline_ = now + profile_.txTimeoutMs;
++            lastSent_ = now; haveSent_ = true;
++            if (!port_.transmit(packet_)) finish(Result::RadioError);
++        }
++    }
++}
++void Engine::txDone() {
++    if (state_ == State::Transmitting) finish(Result::Sent);
++}
++bool Engine::duplicate(const Message &m) const {
++    for (uint8_t i = 0; i < seenCount_; ++i)
++        if (seen_[i].boot == m.session && seen_[i].seq == m.sequence
++            && !memcmp(seen_[i].sender, m.sender, 8)) return true;
++    return false;
++}
++void Engine::received(const uint8_t *packet, int8_t rssi, int8_t snr) {
++    if (!active_ || state_ == State::Transmitting) return;
++    Message m;
++    if (!decode(packet, PacketSize, profile_.id, m)
++        || !memcmp(m.sender, sender_, 8) || duplicate(m)) return;
++    Key &key = seen_[seenPos_]; memcpy(key.sender, m.sender, 8);
++    key.boot = m.session; key.seq = m.sequence;
++    seenPos_ = (seenPos_ + 1) % 64; if (seenCount_ < 64) ++seenCount_;
++    if (rxCount_ == RxCapacity) { ++dropped_; return; }
++    Record &record = rx_[(rxHead_ + rxCount_) % RxCapacity];
++    if (!++nextRx_) ++nextRx_;
++    record.id = nextRx_; memcpy(record.bytes, packet, PacketSize);
++    record.bytes[PacketSize] = uint8_t(rssi); record.bytes[PacketSize + 1] = uint8_t(snr);
++    ++rxCount_;
++}
++}
+diff --git a/src/lib/ElrsChat/ChatEngine.h b/src/lib/ElrsChat/ChatEngine.h
+new file mode 100644
+index 00000000..209a177c
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatEngine.h
+@@ -0,0 +1,67 @@
++#pragma once
++#include "ChatProtocol.h"
++
++namespace chat {
++struct Profile {
++    uint8_t id = 1;
++    uint32_t frequency = 0; // Zero means no RF profile provisioned.
++    uint8_t power = 0;
++    uint32_t minIntervalMs = 1000;
++    uint32_t txTimeoutMs = 2000;
++    uint32_t maxQueueMs = 3000;
++};
++class Port {
++public:
++    virtual ~Port() {}
++    // Validate/store temporary chat settings only; never touch RC or start RF.
++    // A successful adapter also selects the compatible over-air profile ID.
++    virtual Result selectProfile(Profile &profile) { (void)profile; return Result::Unsupported; }
++    virtual bool startReceive() = 0;
++    virtual Result receiveFailure() const { return Result::Unsupported; }
++    virtual void endSession() {}
++    virtual Mode mode() const { return Mode::Normal; }
++    virtual void standby() = 0;
++    virtual bool channelClear() = 0;
++    virtual bool transmit(const uint8_t *packet) = 0;
++    virtual uint32_t random32() = 0;
++    virtual void reply(const uint8_t *payload, uint8_t length) = 0;
++};
++// All methods run on one task. ISR/other-core input is marshalled by ChatDevice.
++class Engine {
++public:
++    Engine(Port &port, const Profile &profile, const uint8_t *sender, uint32_t boot);
++    void command(const uint8_t *p, uint8_t n, uint32_t now);
++    void tick(uint32_t now);
++    void received(const uint8_t *packet, int8_t rssi, int8_t snr);
++    void txDone();
++    void disconnect();
++    State state() const { return state_; }
++    Result result() const { return result_; }
++    uint8_t receivedCount() const { return rxCount_; }
++    uint32_t client() const { return client_; }
++private:
++    struct Key { uint8_t sender[8]; uint32_t boot; uint32_t seq; };
++    struct Record { uint16_t id; uint8_t bytes[RecordSize]; };
++    Port &port_;
++    Profile profile_;
++    uint8_t sender_[8];
++    uint32_t boot_, client_ = 0, seq_ = 0, lease_ = 0, deadline_ = 0, stageTime_ = 0;
++    uint32_t queuedAt_ = 0, lastSent_ = 0;
++    bool haveSent_ = false, stopAfterTx_ = false, active_ = false;
++    State state_ = State::Idle;
++    Result result_ = Result::None;
++    uint16_t request_ = 0, highWater_ = 0;
++    uint8_t total_ = 0, used_ = 0, staging_[MaxText] = {}, packet_[PacketSize] = {};
++    Key seen_[64] = {};
++    uint8_t seenCount_ = 0, seenPos_ = 0;
++    Record rx_[RxCapacity] = {};
++    uint8_t rxHead_ = 0, rxCount_ = 0;
++    uint16_t nextRx_ = 0, dropped_ = 0;
++    void status(uint32_t client, uint16_t request) { status(client, request, result_); }
++    void status(uint32_t client, uint16_t request, Result replyResult);
++    void expire(uint32_t now);
++    void finish(Result result);
++    void stop(Result result);
++    bool duplicate(const Message &m) const;
++};
++}
+diff --git a/src/lib/ElrsChat/ChatMailbox.h b/src/lib/ElrsChat/ChatMailbox.h
+new file mode 100644
+index 00000000..dd18638a
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatMailbox.h
+@@ -0,0 +1,122 @@
++#pragma once
++#include "ChatProtocol.h"
++#include <string.h>
++
++namespace chat {
++// A device-local CRSF STRING parameter. No new global CRSF frame/command ID.
++// Binary local messages are base64 strings; the RF protocol is unchanged.
++class Mailbox {
++public:
++    static constexpr uint8_t Read = 0x2c, Write = 0x2d, Entry = 0x2b;
++    static constexpr uint8_t MaxValue = 56, MaxCommand = LocalHeader + 1 + ChunkSize;
++    static const char *name() { return "ELRS Chat"; }
++    uint8_t field = 0;
++    char value[MaxValue + 1] = "v1";
++
++    bool addressed(uint8_t type, const uint8_t *p, size_t n) const {
++        return field && (type == Read || type == Write) && n >= 4
++            && p[0] == 0xee && p[1] == 0xef && p[2] == field;
++    }
++    static bool command(const uint8_t *p, uint8_t n) {
++        if (n < LocalHeader || p[0] != 'C' || p[1] != 'H'
++            || p[2] != LocalVersion || !get32(p + 4)) return false;
++        switch (Op(p[3])) {
++        case Op::Enter: return n == LocalHeader || n == LocalHeader + 5;
++        case Op::Poll: case Op::Exit: case Op::Commit: case Op::Release:
++            return n == LocalHeader;
++        case Op::Begin: case Op::Read: return n == LocalHeader + 1;
++        case Op::Data: return n >= LocalHeader + 2 && n <= MaxCommand;
++        default: return false;
++        }
++    }
++    static uint8_t encode(const uint8_t *p, uint8_t n, char *out) {
++        static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++        uint8_t j = 0;
++        for (uint8_t i = 0; i < n; i += 3) {
++            uint32_t v = uint32_t(p[i]) << 16;
++            if (i + 1 < n) v |= uint32_t(p[i + 1]) << 8;
++            if (i + 2 < n) v |= p[i + 2];
++            out[j++] = alphabet[(v >> 18) & 63]; out[j++] = alphabet[(v >> 12) & 63];
++            out[j++] = i + 1 < n ? alphabet[(v >> 6) & 63] : '=';
++            out[j++] = i + 2 < n ? alphabet[v & 63] : '=';
++        }
++        out[j] = 0;
++        return j;
++    }
++    static uint8_t decode(const uint8_t *s, uint8_t n, uint8_t *out, uint8_t capacity) {
++        if (!n || n % 4 || n > MaxValue) return 0;
++        uint8_t used = 0;
++        for (uint8_t i = 0; i < n; i += 4) {
++            uint32_t v = 0;
++            uint8_t pad = 0;
++            for (uint8_t j = 0; j < 4; ++j) {
++                const uint8_t c = s[i + j]; int b;
++                if (c >= 'A' && c <= 'Z') b = c - 'A';
++                else if (c >= 'a' && c <= 'z') b = c - 'a' + 26;
++                else if (c >= '0' && c <= '9') b = c - '0' + 52;
++                else if (c == '+') b = 62;
++                else if (c == '/') b = 63;
++                else if (c == '=' && i + 4 == n && j >= 2) { b = 0; ++pad; }
++                else return 0;
++                if (pad && c != '=') return 0;
++                v = (v << 6) | unsigned(b);
++            }
++            if ((pad == 1 && (v & 0xff)) || (pad == 2 && (v & 0xffff))) return 0;
++            if (used + 3 - pad > capacity) return 0;
++            out[used++] = v >> 16;
++            if (pad < 2) out[used++] = v >> 8;
++            if (!pad) out[used++] = v;
++        }
++        return used;
++    }
++    uint8_t request(const uint8_t *p, uint8_t n, uint8_t *out) const {
++        // Payload includes destination, origin, field, and a terminated STRING.
++        if (n < 5 || n > MaxValue + 4 || p[n - 1] != 0) return 0;
++        const uint8_t count = decode(p + 3, n - 4, out, MaxCommand);
++        return command(out, count) ? count : 0;
++    }
++    void reply(const uint8_t *p, uint8_t n) {
++        if (n <= 42) encode(p, n, value);
++    }
++    uint8_t read(uint8_t chunk, uint8_t packetLimit, uint8_t *out) {
++        // Parameter snapshots must not change between chunks, including retries.
++        if (packetLimit < 12 || packetLimit > 64) return 0;
++        if (!chunk) { memcpy(snapshot_, value, sizeof(value)); chunkMax_ = packetLimit - 8; }
++        if (!chunkMax_ || packetLimit - 8 != chunkMax_) return 0;
++        uint8_t data[2 + 10 + MaxValue + 2] = {0, 0x8a}; // root, hidden STRING
++        memcpy(data + 2, name(), 10);
++        const uint8_t len = uint8_t(strlen(snapshot_));
++        memcpy(data + 12, snapshot_, len + 1);
++        data[13 + len] = MaxValue; // CRSF STRING maximum length
++        const uint8_t total = 14 + len;
++        const uint16_t offset = uint16_t(chunk) * chunkMax_;
++        if (offset >= total) return 0;
++        const uint8_t count = total - offset < chunkMax_ ? total - offset : chunkMax_;
++        out[0] = 0xef; out[1] = 0xee; out[2] = field;
++        out[3] = (total + chunkMax_ - 1) / chunkMax_ - chunk - 1;
++        memcpy(out + 4, data + offset, count);
++        return count + 4;
++    }
++private:
++    char snapshot_[MaxValue + 1] = {};
++    uint8_t chunkMax_ = 0;
++};
++
++// Both caller and consumer run on the handset/loop core. RF callers additionally
++// use a critical section; no blocking RTOS mutex is needed on the normal RC path.
++template <typename T, uint8_t Capacity> class Queue {
++public:
++    inline __attribute__((always_inline)) bool push(const T &item) {
++        if (count_ == Capacity) return false;
++        data_[(head_ + count_) % Capacity] = item; ++count_; return true;
++    }
++    inline __attribute__((always_inline)) bool pop(T &item) {
++        if (!count_) return false;
++        item = data_[head_]; head_ = (head_ + 1) % Capacity; --count_; return true;
++    }
++    void clear() { head_ = count_ = 0; }
++private:
++    T data_[Capacity] = {};
++    volatile uint8_t head_ = 0, count_ = 0;
++};
++}
+diff --git a/src/lib/ElrsChat/ChatProfile.h b/src/lib/ElrsChat/ChatProfile.h
+new file mode 100644
+index 00000000..ba67f21d
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatProfile.h
+@@ -0,0 +1,18 @@
++#pragma once
++#include "ChatEngine.h"
++
++namespace chat {
++// Hardware capability limits, not regional RF approval. The adapter separately
++// enforces its experimental-RF gate and board-specific calibration limits.
++inline bool selectSupportedProfile(Profile &p, uint8_t minPower, uint8_t maxPower,
++                                   bool subGhz, bool band2400) {
++    if (p.power > 7 || p.power < minPower || p.power > maxPower) return false;
++    if (band2400 && p.frequency >= 2401000000UL && p.frequency <= 2482000000UL) {
++        p.id = 1; return true;
++    }
++    if (subGhz && p.frequency >= 863000000UL && p.frequency <= 928000000UL) {
++        p.id = 2; return true;
++    }
++    return false;
++}
++}
+diff --git a/src/lib/ElrsChat/ChatProtocol.cpp b/src/lib/ElrsChat/ChatProtocol.cpp
+new file mode 100644
+index 00000000..982960bf
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatProtocol.cpp
+@@ -0,0 +1,68 @@
++#include "ChatProtocol.h"
++#include <string.h>
++
++namespace chat {
++uint16_t get16(const uint8_t *p) { return uint16_t(p[0]) | uint16_t(p[1]) << 8; }
++uint32_t get32(const uint8_t *p) {
++    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
++}
++void put16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
++void put32(uint8_t *p, uint32_t v) {
++    for (unsigned i = 0; i < 4; ++i) p[i] = v >> (8 * i);
++}
++uint16_t crc16(const uint8_t *p, size_t n) {
++    uint16_t crc = 0xffff; // CRC-16/CCITT-FALSE: poly 1021, init FFFF, xorout 0.
++    while (n--) {
++        crc ^= uint16_t(*p++) << 8;
++        for (unsigned i = 0; i < 8; ++i)
++            crc = (crc & 0x8000) ? uint16_t((crc << 1) ^ 0x1021) : uint16_t(crc << 1);
++    }
++    return crc;
++}
++bool validText(const uint8_t *p, size_t n) {
++    if (!n || n > MaxText) return false;
++    size_t i = 0;
++    while (i < n) {
++        uint8_t c = p[i++];
++        if (c >= 0x20 && c <= 0x7e) continue;
++        unsigned extra;
++        uint32_t value, minimum;
++        if (c >= 0xc2 && c <= 0xdf) { extra = 1; value = c & 0x1f; minimum = 0x80; }
++        else if (c >= 0xe0 && c <= 0xef) { extra = 2; value = c & 0x0f; minimum = 0x800; }
++        else if (c >= 0xf0 && c <= 0xf4) { extra = 3; value = c & 7; minimum = 0x10000; }
++        else return false;
++        if (i + extra > n) return false;
++        while (extra--) {
++            c = p[i++];
++            if ((c & 0xc0) != 0x80) return false;
++            value = (value << 6) | (c & 0x3f);
++        }
++        if (value < minimum || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)
++            || (value >= 0x80 && value <= 0x9f)) return false;
++    }
++    return true;
++}
++bool encode(const Message &m, uint8_t profile, uint8_t *out) {
++    if (!validText(m.text, m.length) || !m.sequence) return false;
++    memset(out, 0, PacketSize);
++    out[0] = 'E'; out[1] = 'C'; out[2] = Version; out[3] = profile;
++    memcpy(out + 4, m.sender, 8);
++    put32(out + 12, m.session); put32(out + 16, m.sequence);
++    out[20] = 0; // Text only. Presets are sent as their readable text.
++    out[21] = m.length;
++    memcpy(out + 22, m.text, m.length);
++    put16(out + 54, crc16(out, 54));
++    return true;
++}
++bool decode(const uint8_t *data, size_t n, uint8_t profile, Message &m) {
++    if (n != PacketSize || data[0] != 'E' || data[1] != 'C' || data[2] != Version
++        || data[3] != profile || data[20] != 0 || data[21] > MaxText
++        || get16(data + 54) != crc16(data, 54) || !get32(data + 16)
++        || !validText(data + 22, data[21])) return false;
++    for (size_t i = 22 + data[21]; i < 54; ++i) if (data[i]) return false;
++    memcpy(m.sender, data + 4, 8); m.session = get32(data + 12);
++    m.sequence = get32(data + 16); m.length = data[21];
++    memset(m.text, 0, sizeof(m.text)); memcpy(m.text, data + 22, m.length);
++    return true;
++}
++}
+diff --git a/src/lib/ElrsChat/ChatProtocol.h b/src/lib/ElrsChat/ChatProtocol.h
+new file mode 100644
+index 00000000..17eb9062
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatProtocol.h
+@@ -0,0 +1,42 @@
++#pragma once
++#include <stddef.h>
++#include <stdint.h>
++
++namespace chat {
++constexpr uint8_t Version = 1;
++// Local v2 requires explicit entry; v1 Lua automatically entered on launch.
++constexpr uint8_t LocalVersion = 2;
++constexpr uint8_t MaxText = 32;
++constexpr uint8_t PacketSize = 56;
++constexpr uint8_t LocalHeader = 10;
++constexpr uint8_t ChunkSize = 16;
++constexpr uint8_t RecordSize = PacketSize + 2;
++constexpr uint8_t RxCapacity = 4;
++
++enum class Op : uint8_t {
++    Poll = 1, Enter = 2, Exit = 3, Begin = 4, Data = 5, Commit = 6,
++    Read = 7, Release = 8, Wifi = 9, Status = 0x81, Record = 0x87
++};
++enum class State : uint8_t { Idle, Receiving, Staging, Queued, Transmitting };
++enum class Result : uint8_t {
++    None, Assembling, Queued, Sending, Sent, Cancelled, Invalid,
++    Incomplete, Busy, Expired, RadioError, Unknown, RateLimited,
++    NoProfile, Unsupported, Inactive, Stale, Armed, RcBusy
++};
++enum class Mode : uint8_t { Normal, Chat, Unavailable };
++struct Message {
++    uint8_t sender[8] = {};
++    uint32_t session = 0;
++    uint32_t sequence = 0;
++    uint8_t length = 0;
++    uint8_t text[MaxText] = {};
++};
++uint16_t get16(const uint8_t *p);
++uint32_t get32(const uint8_t *p);
++void put16(uint8_t *p, uint16_t v);
++void put32(uint8_t *p, uint32_t v);
++uint16_t crc16(const uint8_t *p, size_t n);
++bool validText(const uint8_t *p, size_t n);
++bool encode(const Message &m, uint8_t profile, uint8_t *out);
++bool decode(const uint8_t *data, size_t n, uint8_t profile, Message &m);
++}
+diff --git a/src/lib/ElrsChat/ChatRcIntegration.h b/src/lib/ElrsChat/ChatRcIntegration.h
+new file mode 100644
+index 00000000..0e535968
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatRcIntegration.h
+@@ -0,0 +1,104 @@
++// Included once, late in tx_main.cpp, to use the upstream RC state directly.
++// All calls run on the loop/SPI interrupt core, outside device callbacks.
++#include "deferred.h"
++volatile bool chatRcPaused = false;
++bool chatHandsetPresent = false;
++bool chatHandsetNeedsModel = false;
++static bool chatSavedPrimary, chatSavedDual;
++static PowerLevels_e chatSavedPower;
++
++static chat::Result chatRcEntryCheck()
++{
++  if (isArmed) return chat::Result::Armed;
++  if (!chatHandsetPresent || firmwareOptions.is_airport || InBindingMode
++      || connectionState >= MODE_STATES || connectionState == awaitingModelId
++      || commitInProgress || ModelUpdatePending || config.IsModified()
++      || !handset->GetRCdataLastRecv()
++      || micros() - handset->GetRCdataLastRecv() > 1000000UL)
++    return chat::Result::RcBusy;
++  return chat::Result::None;
++}
++
++chat::Result chatRcSuspend()
++{
++  auto result = chatRcEntryCheck();
++  if (result != chat::Result::None) return result;
++  static const device_t *const keep[] = {
++    &Handset_device, &LED_device, &RGB_device,
++#if defined(PLATFORM_ESP32) && !defined(PLATFORM_ESP32_C3)
++    &Thermal_device,
++#endif
++  };
++  // Wait out any in-flight core 0 RF/config callback, then prevent new ones.
++  if (!devicesPauseExcept(keep, ARRAY_SIZE(keep))) return chat::Result::RcBusy;
++  result = chatRcEntryCheck();
++  if (result == chat::Result::None && hasDeferredFunction()) result = chat::Result::RcBusy;
++  if (result != chat::Result::None) {
++    devicesPauseExcept(nullptr, 0);
++    return result;
++  }
++  noInterrupts();
++  chatRcPaused = true;
++  hwTimer::stop();
++  Radio.SetTxIdleMode();
++  busyTransmitting = false;
++  chatSavedPrimary = FHSSusePrimaryFreqBand;
++  chatSavedDual = FHSSuseDualBand;
++  chatSavedPower = POWERMGNT::currPower();
++  otaConnector.resetOutputQueue();
++  linkStats.uplink_Link_quality = 0;
++  linkStats.downlink_Link_quality = 0;
++  setConnectionState(disconnected);
++  interrupts();
++  webserverPreventAutoStart = true;
++  return chat::Result::None;
++}
++
++void chatRcRestore(bool resume)
++{
++  // An updater may already have ended the driver. Never revive its RF.
++  if (connectionState < wifiUpdate) {
++    noInterrupts();
++    Radio.RXdoneCallback = &RXdoneISR;
++    Radio.TXdoneCallback = &TXdoneISR;
++    FHSSusePrimaryFreqBand = chatSavedPrimary;
++    FHSSuseDualBand = chatSavedDual;
++    busyTransmitting = false;
++    TelemetryRcvPhase = ttrpTransmitting;
++    NextPacketIsDataUl = false;
++    syncTelemBoostState = stbIdle;
++    RxWiFiReadyToSend = false;
++    DataUlSender.ResetState();
++    DataDlReceiver.ResetState();
++    otaConnector.resetOutputQueue();
++    LqTQly.reset();
++    LastTLMpacketRecv_Ms = 0;
++    RxDisconnected_Ms = 0;
++    linkStats.uplink_Link_quality = 0;
++    linkStats.downlink_Link_quality = 0;
++    connectionHasModelMatch = false;
++    // Bypass the stock same-rate cache: chat changed the actual radio config.
++    config.SetRate(adjustPacketRateForBaud(config.GetRate()));
++    ExpressLRS_currAirRate_Modparams = nullptr;
++    SetRFLinkRate(config.GetRate());
++    if (ModelUpdatePending || config.IsModified()) {
++      POWERMGNT::setPower(PowerLevels_e(config.GetPower()));
++      ResetPower();
++    }
++    else POWERMGNT::setPower(chatSavedPower);
++    DynamicPower_Init();
++    Radio.ApplyPendingPower();
++    LbtEnableIfRequired();
++    LbtCcaTimerStart();
++    syncSpamCounter = syncSpamAmount;
++    syncSpamCounterAfterRateChange = syncSpamAmountAfterRateChange;
++    setConnectionState(!chatHandsetPresent ? noCrossfire :
++        (chatHandsetNeedsModel ? awaitingModelId : disconnected));
++    chatRcPaused = false;
++    if (resume && chatHandsetPresent) hwTimer::resume();
++    interrupts();
++  } else {
++    chatRcPaused = false;
++  }
++  devicesPauseExcept(nullptr, 0);
++}
+diff --git a/src/lib/ElrsChat/ChatSession.h b/src/lib/ElrsChat/ChatSession.h
+new file mode 100644
+index 00000000..b22b504b
+--- /dev/null
++++ b/src/lib/ElrsChat/ChatSession.h
+@@ -0,0 +1,38 @@
++#pragma once
++#include "ChatProtocol.h"
++
++namespace chat {
++class SessionPort {
++public:
++    virtual ~SessionPort() {}
++    // Failure must leave ordinary RC running. Success leaves its timer stopped.
++    virtual Result suspendRc() = 0;
++    virtual bool configureChat() = 0;
++    virtual void stopChat() = 0;
++    virtual void restoreRc(bool resume) = 0;
++};
++// Shared by the real adapter and native tests. Configuration is temporary and
++// restoration occurs once, including failed entry and lost Lua sessions.
++class Session {
++public:
++    explicit Session(SessionPort &port) : port_(port) {}
++    Result enter() {
++        if (active_) return Result::None;
++        const Result result = port_.suspendRc();
++        if (result != Result::None) return result;
++        active_ = true;
++        if (!port_.configureChat()) { leave(); return Result::Unsupported; }
++        return Result::None;
++    }
++    void leave(bool resume = true) {
++        if (!active_) return;
++        port_.stopChat();
++        port_.restoreRc(resume);
++        active_ = false;
++    }
++    bool active() const { return active_; }
++private:
++    SessionPort &port_;
++    bool active_ = false;
++};
++}
+diff --git a/src/lib/ElrsChat/README.md b/src/lib/ElrsChat/README.md
+new file mode 100644
+index 00000000..90481d86
+--- /dev/null
++++ b/src/lib/ElrsChat/README.md
+@@ -0,0 +1,69 @@
++# Optional transmitter peer messaging
++
++This is an experimental, explicitly entered RF mode for short public messages.
++It does not run concurrently with RC, and it does not add RF acknowledgements,
++automatic retries, or mesh forwarding. The default boot mode is ordinary RC.
++
++## Local interface
++
++The TX registers one hidden CRSF STRING parameter named `ELRS Chat`. Its field
++number is assigned by the existing parameter registry, not hardcoded. The Lua
++tool discovers it through device information (0x29) and parameter reads (0x2C).
++Writes use 0x2D and receive the standard accepted-value echo. The application
++later replaces the volatile string with its response, read as 0x2B chunks.
++Each multi-chunk read uses an immutable snapshot. The STRING maximum length is
++56 characters. Values are canonical base64 representations of local CH/v2
++messages; the initial value is `v1` to identify this transport revision.
++
++Outside chat mode, only requests addressed to the TX, from the Lua endpoint,
++for this registered field are intercepted. During chat, other extended commands
++are blocked except model selection, which cancels chat and reaches the normal
++model handler. Raw RC channel frames keep their upstream routing in both modes.
++0x7F is not used or intercepted. Standard `elrs.lua` does not need changes.
++
++## Lifetime and RF ownership
++
++Lua r13 sends integer frequency in kHz (uint32 little-endian) and the ELRS power
++enum as a five-byte Enter body. Empty Enter retains the current chat settings
++(initially the compiled defaults) for older scripts. The adapter validates the requested band and calibrated power
++before suspending RC. Settings are temporary RAM state; ordinary RC settings
++and persistent configuration are unchanged. A live session cannot be retuned.
++After exiting, the next entry can select another channel; pending records from
++the previous channel are discarded. Lua verifies the applied frequency bytes
++and power before enabling its send UI. Existing experimental-RF/domain gates
++remain in force regardless of the values requested by Lua.
++
++The engine, four command slots and four RF event slots are allocated with
++`nothrow` on the first syntactically valid write. Reading/discovering the field
++does not allocate them. The handset callbacks and loop own this state on the
++same core; only RF event access crosses an ISR, under interrupt exclusion.
++TX completion has a separate flag, so a full receive queue cannot discard it.
++Idle application state is released six seconds after the last accepted write,
++once RF mode has ended. Every new allocation obtains a new RF session nonce.
++
++RC mode changes execute outside device callbacks. The device scheduler pauses
++at callback boundaries, with request-generation acknowledgements and a bounded
++100 ms wait. Failure leaves RC running. The inactive scheduler uses a lock-free
++load rather than an RTOS mutex. Timer resume follows complete RC RF setup.
++
++## Build and review boundaries
++
++`ELRS_CHAT` is absent in stock targets. All modifications to existing C++ files
++are guarded by it; the stock PlatformIO configuration and SetRFLinkRate API are
++unchanged. The library lives inside `src/lib` and the native tests inside
++`src/test/test_elrs_chat`. Run the existing native test workflow to include them.
++
++Code inclusion does not authorize a new waveform under an existing RC regulatory
++profile. Fixed-channel transmission additionally requires `CHAT_EXPERIMENTAL_RF`
++and an explicit nonzero frequency. EU CE 2.4 GHz is refused because the RSSI
++heuristic is not compliant LBT. Default firmware has no provisioned chat RF
++profile. Regional RF qualification remains required before general release.
++
++The current adapters cover SX128x, SX127x and LR1121 single-radio hardware.
++Profile IDs identify the intended over-air band/modulation, not the chip family;
++cross-chip interoperability still requires hardware testing. Dual-radio/Gemini
++entry is rejected. New drivers and MCU families require separate validation.
++
++Lua r13 needs firmware with configured-entry support. The previous private-frame
++transport is intentionally not supported, because retaining it would retain the
++CRSF namespace conflict. The RF message format remains version 1.
+diff --git a/src/lib/LR1121Driver/LR1121.cpp b/src/lib/LR1121Driver/LR1121.cpp
+index 175feeb2..7371642a 100644
+--- a/src/lib/LR1121Driver/LR1121.cpp
++++ b/src/lib/LR1121Driver/LR1121.cpp
+@@ -645,7 +645,11 @@ void ICACHE_RAM_ATTR LR1121Driver::TXnb(uint8_t *data, const bool sendGeminiBuff
+         }
+     }
+ 
++#ifdef ELRS_CHAT
++    WORD_ALIGNED_ATTR uint8_t outBuffer[64] = {0};
++#else
+     WORD_ALIGNED_ATTR uint8_t outBuffer[32] = {0};
++#endif
+     const uint8_t length = PayloadLength + 3; // 3 extra zero bytes for the 24-bit timeout
+     codec->encode(outBuffer, data, PayloadLength);
+     if (sendGeminiBuffer)
+diff --git a/src/lib/LR1121Driver/LR1121.h b/src/lib/LR1121Driver/LR1121.h
+index ba4c5318..176e7989 100644
+--- a/src/lib/LR1121Driver/LR1121.h
++++ b/src/lib/LR1121Driver/LR1121.h
+@@ -64,6 +64,9 @@ public:
+     int WriteUpdateBytes(const uint8_t *bytes, uint32_t size);
+     int EndUpdate();
+ 
++#ifdef ELRS_CHAT
++    void ApplyPendingPower() { CommitOutputPower(); }
++#endif
+ private:
+     // constant used for no power change pending
+     // must not be a valid power register value
+@@ -82,8 +85,13 @@ private:
+     lr11xx_RadioOperatingModes_t fallBackMode;
+     BufferCodec *codec;
+ 
++#ifdef ELRS_CHAT
++    WORD_ALIGNED_ATTR uint8_t rx_buf[64] = {};
++    WORD_ALIGNED_ATTR uint8_t rx2_buf[64] = {};
++#else
+     WORD_ALIGNED_ATTR uint8_t rx_buf[32] = {};
+     WORD_ALIGNED_ATTR uint8_t rx2_buf[32] = {};
++#endif
+ 
+     bool CheckVersion(SX12XX_Radio_Number_t radioNumber);
+ 
+diff --git a/src/lib/SX127xDriver/SX127x.h b/src/lib/SX127xDriver/SX127x.h
+index e18ca331..eb5401e3 100644
+--- a/src/lib/SX127xDriver/SX127x.h
++++ b/src/lib/SX127xDriver/SX127x.h
+@@ -75,6 +75,9 @@ public:
+     /////////////Non-blocking RX related Functions///////////////
+     void RXnb();
+ 
++#ifdef ELRS_CHAT
++    void ApplyPendingPower() { CommitOutputPower(); }
++#endif
+ private:
+     // constant used for no power change pending
+     // must not be a valid power register value
+diff --git a/src/lib/SX1280Driver/SX1280.h b/src/lib/SX1280Driver/SX1280.h
+index 7f153727..167b9d73 100644
+--- a/src/lib/SX1280Driver/SX1280.h
++++ b/src/lib/SX1280Driver/SX1280.h
+@@ -43,6 +43,9 @@ public:
+     void GetLastPacketStats();
+     void CheckForSecondPacket();
+ 
++#ifdef ELRS_CHAT
++    void ApplyPendingPower() { CommitOutputPower(); }
++#endif
+ private:
+     // constant used for no power change pending
+     // must not be a valid power register value
+diff --git a/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h b/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h
+index 23d7a8ce..89ad477c 100644
+--- a/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h
++++ b/src/lib/SX12xxDriverCommon/SX12xxDriverCommon.h
+@@ -70,7 +70,11 @@ public:
+     bool (*RXdoneCallback)(rx_status crcFail); //function pointer for callback
+     void (*TXdoneCallback)(); //function pointer for callback
+ 
++#ifdef ELRS_CHAT
++    #define RXBuffSize 56
++#else
+     #define RXBuffSize 16
++#endif
+     WORD_ALIGNED_ATTR uint8_t RXdataBuffer[RXBuffSize];
+     WORD_ALIGNED_ATTR uint8_t RXdataBufferSecond[RXBuffSize];
+ 
+diff --git a/src/lib/tx-crsf/TXModuleEndpoint.cpp b/src/lib/tx-crsf/TXModuleEndpoint.cpp
+index 2e1480e4..c50b1131 100644
+--- a/src/lib/tx-crsf/TXModuleEndpoint.cpp
++++ b/src/lib/tx-crsf/TXModuleEndpoint.cpp
+@@ -1,4 +1,7 @@
+ #include "TXModuleEndpoint.h"
++#ifdef ELRS_CHAT
++#include "ChatDevice.h"
++#endif
+ 
+ #include "rxtx_intf.h"
+ #include "CRSFRouter.h"
+@@ -27,6 +30,9 @@ void TXModuleEndpoint::begin()
+     }
+ #endif
+     registerParameters();
++#ifdef ELRS_CHAT
++    registerParameter(&chatParameter);
++#endif
+ }
+ 
+ bool TXModuleEndpoint::handleRaw(const crsf_header_t *message)
+@@ -41,6 +47,9 @@ bool TXModuleEndpoint::handleRaw(const crsf_header_t *message)
+ 
+ void TXModuleEndpoint::handleMessage(const crsf_header_t *message)
+ {
++#ifdef ELRS_CHAT
++    if (chatDeviceHandleMessage(message)) return;
++#endif
+     const crsf_frame_type_e packetType = message->type;
+ 
+     const auto extMessage = (crsf_ext_header_t *)message;
+diff --git a/src/lua/ELRSChat.lua b/src/lua/ELRSChat.lua
+new file mode 100644
+index 00000000..6e3050d8
+--- /dev/null
++++ b/src/lua/ELRSChat.lua
+@@ -0,0 +1,44 @@
++-- ELRS Public Chat r16 / EdgeTX. GPL-3.0-or-later.
++-- Copy this file AND the ELRSChat folder to /SCRIPTS/TOOLS/.
++-- Same r13-capable module firmware; no changes to RF or normal RC.
++local CHAT_FREQUENCY_KHZ = 2440000 -- 2440.000 MHz; peers use the same channel.
++local CHAT_POWER_MW = 25          -- Must be supported by module calibration.
++local path="/SCRIPTS/TOOLS/ELRSChat/r16/"
++local files={"common","transport","view","core"}
++local app, problem
++
++local function init()
++  app=nil; problem=nil
++  collectgarbage("collect")
++  -- Compile small chunks separately, without retaining the source compiler's
++  -- debug data. EdgeTX writes stripped .luac caches on the SD card. Loading all
++  -- source in one pass can exceed a monochrome radio's heap before init runs.
++  for i=1,#files do
++    local chunk=loadScript(path..files[i]..".lua","bt")
++    if not chunk then problem="COPY ELRSChat FOLDER"; return end
++    chunk=nil; collectgarbage("collect")
++  end
++  app={CHAT_FREQUENCY_KHZ=CHAT_FREQUENCY_KHZ,CHAT_POWER_MW=CHAT_POWER_MW}
++  for i=1,#files do
++    local chunk=loadScript(path..files[i]..".lua","b")
++    if not chunk then app=nil; problem="SD WRITE ERROR"; return end
++    chunk(app)
++    chunk=nil; collectgarbage("collect")
++  end
++  app.initState(); app.initLayout()
++  app.initState=nil; app.initLayout=nil; app.prepareProfile=nil
++  collectgarbage("collect")
++end
++
++local function run(event)
++  if problem then
++    lcd.clear()
++    lcd.drawText(0,0,"ELRS CHAT R16",INVERS or 0)
++    lcd.drawText(0,16,problem,0)
++    lcd.drawText(0,32,"REOPEN AFTER COPYING",0)
++    lcd.drawText(0,56,"EXIT:CLOSE",0)
++    return event==EVT_VIRTUAL_EXIT and 2 or 0
++  end
++  return app.run(event)
++end
++return {init=init,run=run}
+diff --git a/src/lua/ELRSChat/r16/common.lua b/src/lua/ELRSChat/r16/common.lua
+new file mode 100644
+index 00000000..e23743b8
+--- /dev/null
++++ b/src/lua/ELRSChat/r16/common.lua
+@@ -0,0 +1,208 @@
++-- ELRS Public Chat r16. GPL-3.0-or-later.
++-- Private per-script state; no globals shared with other Lua tools.
++local q = ...
++local floor, sub = math.floor, string.sub
++q.MAX, q.CHUNK = 32, 16
++q.HISTORY_LIMIT = 50
++q.POLL, q.ENTER, q.EXIT, q.BEGIN, q.DATA, q.COMMIT, q.READ, q.RELEASE = 1,2,3,4,5,6,7,8
++q.states = {[0]="IDLE", "RX", "EDIT", "WAIT", "TX"}
++q.results = {[0]="READY", "ASSEMBLING", "QUEUED", "SENDING", "SENT", "CANCELLED",
++  "INVALID", "INCOMPLETE", "CHANNEL BUSY", "EXPIRED", "RADIO ERROR", "UNKNOWN",
++  "WAIT 1 SECOND", "NO RF PROFILE", "UNSUPPORTED", "INACTIVE", "STALE", "DISARM FIRST", "RC BUSY - RETRY"}
++q.presets = {"ALL OK", "HELP NEEDED", "WHERE ARE YOU?", "SEND YOUR LOCATION",
++  "MESSAGE RECEIVED", "WAITING HERE", "ON MY WAY", "PLEASE REPEAT",
++  "I AM INJURED", "CANNOT MOVE", "NEED MEDICAL HELP", "NEED EVACUATION",
++  "CALL EMERGENCY SERVICES", "DANGER HERE", "MOVE TO A SAFE PLACE",
++  "STAY WHERE YOU ARE", "RETURN TO BASE", "NEED WATER", "NEED SHELTER", "LOW BATTERY"}
++q.menu = {"Preset message", "Write message", "Module info", "Reconnect", "Exit chat"}
++q.chars = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,?!:/+-"
++q.actions = {"DELETE", "SEND", "CANCEL"}
++q.powers = {10,25,50,100,250,500,1000,2000}
++-- Keep UI timers in a small exact integer ring, including across signed
++-- getTime() rollover on Lua 5.3. All live deadlines are at most eight seconds.
++function q.clock() return getTime()%16777216 end
++function q.elapsed(now, since) return (now-since)%16777216 end
++function q.due(now, deadline) return q.elapsed(now,deadline)<8388608 end
++
++function q.le16(t, i)
++  return (t[i] or 0)+(t[i+1] or 0)*256
++end
++function q.token(t, i)
++  -- Opaque uint32 IDs must remain exact: neither signed int32 nor float32
++  -- can represent every wire ID as a positive number.
++  return string.char(t[i],t[i+1],t[i+2],t[i+3])
++end
++local function append(t, n, count)
++  for _=1,count do t[#t+1]=n%256; n=floor(n/256) end
++end
++function q.prepareProfile()
++  q.entryProfile=nil; q.expectedHz=nil; q.configError=nil; q.configLabel=nil; q.profileMatches=false
++  local khz=q.CHAT_FREQUENCY_KHZ
++  if type(khz)~="number" or not ((khz>=2401000 and khz<=2482000) or (khz>=863000 and khz<=928000))
++      or khz%1~=0 then q.configError="BAD CHAT FREQUENCY"; return end
++  local powerIndex
++  for i=1,#q.powers do if q.CHAT_POWER_MW==q.powers[i] then powerIndex=i-1 end end
++  if not powerIndex then q.configError="BAD CHAT POWER"; return end
++  q.entryProfile={}; append(q.entryProfile,khz,4); q.entryProfile[5]=powerIndex
++  -- Multiply byte by byte, never constructing >2^31 integers or rounded Hz.
++  q.expectedHz={}; local carry=0
++  for i=1,4 do
++    local n=q.entryProfile[i]*1000+carry
++    q.expectedHz[i]=n%256; carry=floor(n/256)
++  end
++  q.configLabel=string.format("%d.%03dMHz %dmW",floor(khz/1000),khz%1000,q.CHAT_POWER_MW)
++end
++function q.id(t, offset)
++  -- Mix all six MAC bytes so devices sharing a manufacturer prefix differ.
++  local h=(t[offset] or 0)*256+(t[offset+1] or 0)
++    +(t[offset+2] or 0)*257+(t[offset+3] or 0)*17
++    +(t[offset+4] or 0)*31+(t[offset+5] or 0)*127
++  return string.format("%04X",h%65536)
++end
++function q.show(text)
++  q.notice=text; q.noticeUntil=(q.clock()+200)%16777216; q.redraw=true
++end
++function q.packet(op, request, body)
++  local d={0xEE,0xEF,67,72,2,op}
++  for i=1,4 do d[#d+1]=string.byte(q.client,i) end
++  append(d,request or 0,2)
++  if body then for _,v in ipairs(body) do d[#d+1]=v end end
++  return d
++end
++local function prefix(m)
++  if m.direction=="Rx" then return "Rx("..m.sender.."):" end
++  return m.failed and "Tx!:" or "Tx:"
++end
++function q.fits(s)
++  if q.color and lcd.sizeText then
++    local width=lcd.sizeText(s,q.textFont)
++    return width<=q.contentWidth
++  end
++  return #s<=(q.color and 21 or floor(q.contentWidth/6))
++end
++function q.wrap(lead,body)
++  local lines={}
++  repeat
++    local count=#body
++    if not q.fits(lead..body) then
++      -- Binary search bounds measurements even for the widest 32-byte text.
++      local low,high=0,count-1
++      while low<high do
++        local mid=floor((low+high+1)/2)
++        if q.fits(lead..sub(body,1,mid)) then low=mid else high=mid-1 end
++      end
++      count=low
++    end
++    -- A prefix and at least one character fit the selected baseline font.
++    count=math.max(1,count)
++    lines[#lines+1]=lead..sub(body,1,count)
++    body=sub(body,count+1); lead=" "
++  until #body==0
++  return lines
++end
++local function lineCount(m) return #m end
++function q.lastScroll() return math.max(1,#q.logLines-q.logRows+1) end
++local function rebuildLog()
++  local oldCount,count=#q.logLines,0
++  for i=1,#q.history do
++    local m=q.history[i]
++    for _,line in ipairs(m) do
++      count=count+1; q.logLines[count]=line; q.logShades[count]=m.rx
++    end
++  end
++  for i=count+1,oldCount do q.logLines[i]=nil; q.logShades[i]=nil end
++end
++function q.addMessage(m)
++  local atEnd=q.scroll==q.lastScroll()
++  -- Store cached display lines without a second copy of every raw message.
++  -- The active send already retains its raw text for failure-prefix reflow.
++  local lines=q.wrap(prefix(m),m.text)
++  lines.rx=m.direction=="Rx"
++  if #q.history==q.HISTORY_LIMIT then
++    q.scroll=math.max(1,q.scroll-lineCount(q.history[1]))
++    for i=1,q.HISTORY_LIMIT-1 do q.history[i]=q.history[i+1] end
++    q.history[q.HISTORY_LIMIT]=nil
++  end
++  q.history[#q.history+1]=lines
++  rebuildLog()
++  q.scroll=atEnd and q.lastScroll() or math.min(q.scroll,q.lastScroll())
++  q.redraw=true
++  return lines
++end
++function q.failTx(label)
++  if q.tx then
++    if label~="SENT" then
++      local atEnd=q.scroll==q.lastScroll()
++      local rowStart=1
++      for i=1,#q.history do
++        if q.history[i]==q.tx.row then break end
++        rowStart=rowStart+lineCount(q.history[i])
++      end
++      local oldCount=lineCount(q.tx.row)
++      local lines=q.wrap("Tx!:",q.tx.text)
++      for i=1,math.max(oldCount,#lines) do q.tx.row[i]=lines[i] end
++      rebuildLog()
++      -- An 18-character Tx gains a wrapped line when its prefix becomes Tx!:.
++      -- Keep the same older/newer record at the top when reading below it.
++      if q.scroll>=rowStart+oldCount then q.scroll=q.scroll+lineCount(q.tx.row)-oldCount end
++      q.scroll=atEnd and q.lastScroll() or math.min(q.scroll,q.lastScroll())
++      q.show(label)
++    end
++    q.tx=nil; q.redraw=true
++  end
++end
++function q.connected(now) return q.last and q.elapsed(now,q.last)<150 end
++function q.sendBlockReason(now)
++  if not q.connected(now) then return "NO MODULE LINK" end
++  if not q.owner then return "SESSION BUSY" end
++  if q.mode~=1 then return "ENTER CHAT FIRST" end
++  if not q.profileMatches then return "RF SETTING MISMATCH" end
++  if q.tx then return "TX IN PROGRESS" end
++  if q.state~=1 then return "RF STATE: "..(q.states[q.state] or "UNKNOWN") end
++  if q.frequency<=0 then return "NO RF PROFILE" end
++  if q.highWater>=65535 then return "ID LIMIT: REOPEN LUA" end
++end
++function q.sendDraft(now)
++  if #q.draft==0 then q.show("EMPTY MESSAGE"); return end
++  local reason=q.sendBlockReason(now)
++  if reason then q.show(reason); return end
++  local row=q.addMessage({direction="Tx",text=q.draft})
++  q.scroll=q.lastScroll()
++  q.highWater=q.highWater+1
++  q.tx={req=q.highWater,text=q.draft,phase="begin",offset=0,started=now,row=row}
++  q.view="home"; q.draft=""; q.notice=nil
++end
++function q.visibleText(t, first, count)
++  local s=""
++  -- The default monochrome font does not contain Hangul. Keep the wire bytes,
++  -- replace non-ASCII code points with '?' for this baseline UI.
++  for i=first,first+count-1 do
++    local b=t[i]
++    if b>=32 and b<=126 then s=s..string.char(b)
++    elseif b>=192 then s=s.."?" end
++  end
++  return s
++end
++function q.initState()
++  q.prepareProfile()
++  q.draftCache=nil; q.draftLines=nil; q.redraw=true; q.lastDraw=q.clock()
++  q.paintedLink=nil; q.paintedAlert=nil; q.paintedExit=nil
++  -- Changes between script launches; not a secret or an authenticated identity.
++  local t=getDateTime and getDateTime() or {}
++  -- Build two bounded 16-bit words, without overflowing integer arithmetic
++  -- or rounding a 32-bit nonce through a single-precision float.
++  local ticks=getTime()
++  local lo=(ticks%65536+(t.sec or 0)*997+(t.min or 0)*257)%65536
++  local hi=(floor(ticks/65536)+(t.day or 0)*1440+(t.hour or 0)*60+(t.min or 0))%65535+1
++  q.client=string.char(lo%256,floor(lo/256),hi%256,floor(hi/256))
++  q.boot=nil; q.last=nil; q.nextPoll=q.clock(); q.nextWire=q.nextPoll; q.needEnter=false; q.lastEnter=0
++  q.mailboxField=nil; q.scanField=nil; q.mailRead=nil; q.discoverAt=q.nextPoll
++  q.linkHint="FINDING MODULE"; q.scanLost=false
++  q.owner=false; q.state=0; q.result=0; q.maxText=q.MAX; q.profile=0; q.frequency=0; q.power=0
++  q.highWater=0; q.ownId="----"; q.dropped=0; q.history={}; q.logLines={}; q.scroll=1
++  q.logShades={}
++  q.view="entry"; q.choice=1; q.picker=2; q.draft=""; q.tx=nil; q.incoming=nil
++  q.mode=nil; q.exitSent=nil; q.exitRequest=65535; q.exitConfirmed=false; q.enterSent=false
++  q.suppressEnterRelease=false
++  q.releaseId=nil; q.releasedId=nil; q.pendingExit=nil; q.lastRxKey=nil; q.rxHead=0; q.notice=nil; q.noticeUntil=0
++end
+diff --git a/src/lua/ELRSChat/r16/core.lua b/src/lua/ELRSChat/r16/core.lua
+new file mode 100644
+index 00000000..1aafa2cb
+--- /dev/null
++++ b/src/lua/ELRSChat/r16/core.lua
+@@ -0,0 +1,213 @@
++-- ELRS Public Chat r16. GPL-3.0-or-later.
++-- Private per-script state; no globals shared with other Lua tools.
++local q = ...
++local floor, sub = math.floor, string.sub
++local function receive(d, now)
++  if type(d)~="table" or #d<12 or #d>60 then return end
++  for i=1,#d do
++    if type(d[i])~="number" or d[i]<0 or d[i]>255 or d[i]%1~=0 then return end
++  end
++  if d[1]~=0xEF or d[2]~=0xEE
++    or d[3]~=67 or d[4]~=72 or d[5]~=2 or q.token(d,7)~=q.client then return end
++  if d[6]==0x81 and #d==44 then
++    if d[25]>4 or d[26]>18 or d[27]<1 or d[27]>q.MAX or d[33]>7 or d[43]>1 or d[44]>2 then return end
++    local newBoot=q.token(d,13)
++    local newFrequency=q.le16(d,29)+q.le16(d,31)*65536.0
++    local newId=q.id(d,17)
++    -- Status polls continue at their original rate; identical polls do not
++    -- repaint the retained color bitmap or invalidate message layout caches.
++    q.redraw=q.redraw or q.boot~=newBoot or q.owner~=(d[43]==1) or q.mode~=d[44]
++      or q.state~=d[25] or q.result~=d[26] or q.maxText~=d[27] or q.profile~=d[28]
++      or q.power~=d[33] or q.dropped~=q.le16(d,39) or q.frequency~=newFrequency or q.ownId~=newId
++      or (d[43]==1 and q.le16(d,41)>q.highWater)
++    if q.boot and newBoot~=q.boot then
++      q.failTx("UNKNOWN / REBOOT"); q.incoming=nil; q.releaseId=nil; q.releasedId=nil
++      q.highWater=0
++      q.needEnter=false; q.enterSent=false; q.view="entry"; q.show("MODULE REBOOTED")
++    end
++    q.boot=newBoot; q.last=now; q.owner=d[43]==1
++    q.mode=d[44]
++    q.state=d[25]; q.result=d[26]; q.maxText=math.min(q.MAX,d[27]); q.profile=d[28]
++    -- Hz is display data only; configured settings are compared byte for byte.
++    q.frequency=newFrequency
++    q.power=d[33]; q.ownId=newId; q.dropped=q.le16(d,39)
++    q.profileMatches=q.entryProfile~=nil and q.power==q.entryProfile[5]
++    if q.profileMatches then
++      for i=1,4 do if d[28+i]~=q.expectedHz[i] then q.profileMatches=false end end
++    end
++    if q.owner then
++      q.highWater=math.max(q.highWater,q.le16(d,41))
++    end
++    if q.needEnter and q.enterSent and (q.le16(d,11)==1 or (q.owner and q.mode==1)) then
++      q.needEnter=false; q.enterSent=false; q.redraw=true
++      if q.owner and q.mode==1 and q.profileMatches then q.view="home"
++      elseif q.owner and q.mode==1 then
++        -- An adapter must not silently clamp or ignore the requested settings.
++        q.show("RF SETTING MISMATCH"); q.pendingExit=now
++      else q.show(not q.owner and q.mode==1 and "SESSION BUSY" or (q.results[q.result] or "ENTRY REFUSED")) end
++    end
++    if q.pendingExit and q.exitSent and q.le16(d,11)==q.exitRequest and q.mode==0 then
++      q.exitConfirmed=true
++    end
++    if (q.mode~=1 or not q.owner) and q.view~="entry" and not q.pendingExit then
++      q.failTx("CHAT ENDED"); q.view="entry"
++      q.show(q.mode==0 and "RC MODE RESTORED" or "SESSION UNAVAILABLE")
++    end
++    if q.tx and q.le16(d,34)==q.tx.req then
++      if q.tx.phase=="waitBegin" and q.result==1 and q.state==2 then q.tx.phase="data" end
++      if q.result>=4 then q.failTx(q.results[q.result] or "ERROR") end
++    end
++    q.rxHead=q.le16(d,36)
++    if q.rxHead~=q.releasedId then q.releasedId=nil end
++    if q.incoming and (not q.owner or q.mode~=1 or q.rxHead~=q.incoming.id) then q.incoming=nil end
++    if q.releaseId and (not q.owner or q.mode~=1 or q.rxHead~=q.releaseId) then q.releaseId=nil end
++    if q.owner and q.mode==1 and q.rxHead~=0 and not q.incoming and not q.releaseId then
++      if q.rxHead==q.releasedId then q.releaseId=q.rxHead
++      else q.incoming={id=q.rxHead,bytes={},next=0,asked=now-30} end
++    end
++  elseif d[6]==0x87 and q.incoming and q.le16(d,11)==q.incoming.id and #d>=15 then
++    local off, count=d[13],#d-14
++    if d[14]~=58 or off~=q.incoming.next or count~=math.min(q.CHUNK,58-off) then return end
++    q.last=now -- A validated record reply also proves the local module is alive.
++    for i=1,count do q.incoming.bytes[off+i]=d[14+i] end
++    q.incoming.next=off+count; q.incoming.asked=now-30
++    if q.incoming.next==58 then
++      local b=q.incoming.bytes
++      if b[1]==69 and b[2]==67 and b[3]==1 and b[4]==q.profile and b[21]==0 and b[22]>=1 and b[22]<=q.MAX then
++        -- RF CRC, UTF-8 and duplicate validation are done by the module engine.
++        local key=""; for i=5,20 do key=key..string.char(b[i]) end
++        if key~=q.lastRxKey then
++          q.addMessage({direction="Rx",sender=q.id(b,5),text=q.visibleText(b,23,b[22])})
++          q.lastRxKey=key
++        end
++      end
++      q.releaseId=q.incoming.id; q.incoming=nil
++    end
++  end
++end
++local function pump(now)
++  if not crossfireTelemetryPop or not crossfireTelemetryPush then return end
++  for _=1,6 do
++    local command,data=crossfireTelemetryPop()
++    if not command then break end
++    local response=q.transportPop(command,data,now)
++    if response then receive(response,now) end
++  end
++  if q.tx and ((q.last and q.elapsed(now,q.last)>=150) or q.elapsed(now,q.tx.started)>650) then
++    q.failTx(q.tx.phase=="waitDone" and "UNKNOWN" or "LOCAL TIMEOUT")
++    q.needEnter=false
++  end
++  if q.transportTick(now) then return 0 end
++  if q.pendingExit then
++    if q.exitConfirmed then return 2 end
++    if not q.exitSent or q.elapsed(now,q.exitSent)>=25 then
++      if q.push(q.EXIT,q.exitRequest,nil,now) then q.exitSent=now end
++    end
++    return 0
++  end
++  if q.needEnter and q.enterSent and q.elapsed(now,q.lastEnter)>=150 then
++    q.needEnter=false; q.show("ENTRY UNCONFIRMED")
++  end
++  -- A mode-changing Enter is issued once per explicit key press. Poll can
++  -- recover a lost response; no delayed retry may suspend RC after a reboot.
++  if q.needEnter and not q.enterSent then
++    if q.push(q.ENTER,1,q.entryProfile,now) then q.lastEnter=now; q.enterSent=true end
++  elseif q.due(now,q.nextPoll) and (not q.last or q.elapsed(now,q.last)>=75) then
++    -- Keep status fresh even when slow Lua callbacks always have READ work.
++    if q.push(q.POLL,0,nil,now) then q.nextPoll=(now+25)%16777216 end
++  elseif q.tx and q.tx.phase=="begin" then
++    if q.push(q.BEGIN,q.tx.req,{#q.tx.text},now) then q.tx.phase="waitBegin" end
++  elseif q.tx and q.tx.phase=="data" then
++    local body={q.tx.offset}
++    for i=q.tx.offset+1,math.min(#q.tx.text,q.tx.offset+q.CHUNK) do body[#body+1]=string.byte(q.tx.text,i) end
++    if q.push(q.DATA,q.tx.req,body,now) then
++      q.tx.offset=q.tx.offset+#body-1
++      if q.tx.offset==#q.tx.text then q.tx.phase="commit" end
++    end
++  elseif q.tx and q.tx.phase=="commit" then
++    if q.push(q.COMMIT,q.tx.req,nil,now) then q.tx.phase="waitDone" end
++  elseif q.releaseId then
++    if q.push(q.RELEASE,q.releaseId,nil,now) then q.releasedId=q.releaseId; q.releaseId=nil end
++  elseif q.incoming and q.elapsed(now,q.incoming.asked)>=30 then
++    if q.push(q.READ,q.incoming.id,{q.incoming.next},now) then q.incoming.asked=now end
++  elseif q.due(now,q.nextPoll) then
++    if q.push(q.POLL,0,nil,now) then q.nextPoll=(now+25)%16777216 end
++  end
++  return 0
++end
++local function eventIs(event, constant) return constant~=nil and event==constant end
++function q.run(event)
++  local now=q.clock()
++  local done=pump(now)
++  if done==2 then return 2 end
++  -- Most callbacks contain no key event. Timers and transport above still run.
++  if not event or event==0 then q.draw(now); return 0 end
++  q.redraw=true
++  local nextKey=eventIs(event,EVT_VIRTUAL_NEXT) or eventIs(event,EVT_VIRTUAL_NEXT_REPT)
++  local prevKey=eventIs(event,EVT_VIRTUAL_PREV) or eventIs(event,EVT_VIRTUAL_PREV_REPT)
++  local enterKey=eventIs(event,EVT_VIRTUAL_ENTER)
++  local longEnterKey=eventIs(event,EVT_VIRTUAL_ENTER_LONG)
++  local exitKey=eventIs(event,EVT_VIRTUAL_EXIT)
++  -- ENTER is a release event. Consume the release following a long press
++  -- ourselves: killEvents() cannot mask ENTER on all EdgeTX builds.
++  -- A fresh FIRST (where delivered) also recovers if the old release was lost.
++  if eventIs(event,EVT_ENTER_FIRST) then q.suppressEnterRelease=false end
++  if q.suppressEnterRelease then
++    if enterKey then q.suppressEnterRelease=false; enterKey=false end
++    longEnterKey=false
++  end
++  local delta=nextKey and 1 or (prevKey and -1 or 0)
++  if q.pendingExit then
++    if exitKey and q.elapsed(now,q.pendingExit)>=800 then return 2 end
++    q.draw(now); return 0
++  end
++  if q.view=="entry" then
++    if enterKey and not q.needEnter then
++      if q.configError then q.show(q.configError)
++      elseif q.connected(now) then q.needEnter=true; q.enterSent=false
++      else
++        q.show(q.linkHint or "NO MODULE REPLY")
++        if q.scanDone then q.scanDone=nil; q.discoverAt=now end
++      end
++    end
++    if exitKey then
++      if not q.enterSent and not q.owner then return 2 end
++      q.needEnter=false; q.pendingExit=now
++    end
++  elseif q.view=="home" then
++    q.scroll=math.max(1,math.min(q.lastScroll(),q.scroll+delta))
++    if enterKey then q.view="menu"; q.choice=1 end
++    if exitKey then q.pendingExit=now end
++  elseif q.view=="menu" or q.view=="presets" then
++    local list=q.view=="menu" and q.menu or q.presets
++    q.choice=(q.choice-1+delta)%#list+1
++    if exitKey then q.view="home" end
++    if enterKey then
++      if q.view=="presets" then q.draft=sub(q.presets[q.choice],1,q.maxText); q.view="confirm"
++      elseif q.choice==1 then q.view="presets"; q.choice=1
++      elseif q.choice==2 then q.view="compose"; q.picker=2
++      elseif q.choice==3 then q.view="info"
++      elseif q.choice==4 then
++        if not q.tx then q.view="entry" end
++      elseif q.choice==5 then q.pendingExit=now end
++    end
++  elseif q.view=="compose" then
++    q.picker=(q.picker-1+delta)%(#q.chars+3)+1
++    if longEnterKey then
++      q.suppressEnterRelease=true
++      q.sendDraft(now)
++    elseif enterKey then
++      if q.picker<=#q.chars then
++        if #q.draft<q.maxText then q.draft=q.draft..sub(q.chars,q.picker,q.picker) else q.show("MESSAGE FULL") end
++      elseif q.picker==#q.chars+1 then q.draft=sub(q.draft,1,-2)
++      elseif q.picker==#q.chars+2 then q.view="confirm"
++      else q.view="home" end
++    end
++    if exitKey then q.view="home" end
++  elseif q.view=="confirm" then
++    if exitKey then q.view="compose"; q.picker=#q.chars+2 end
++    if enterKey then q.sendDraft(now) end
++  elseif exitKey then q.view="home" end
++  q.draw(now)
++  return 0
++end
+diff --git a/src/lua/ELRSChat/r16/transport.lua b/src/lua/ELRSChat/r16/transport.lua
+new file mode 100644
+index 00000000..6389ad05
+--- /dev/null
++++ b/src/lua/ELRSChat/r16/transport.lua
+@@ -0,0 +1,169 @@
++-- ELRS Public Chat r16. GPL-3.0-or-later.
++-- Private per-script state; no globals shared with other Lua tools.
++local q = ...
++local floor, sub = math.floor, string.sub
++local function hint(message)
++  if q.linkHint~=message then q.linkHint=message; q.redraw=true end
++end
++local function nextField(now)
++  q.scanField=q.scanField and q.scanField>1 and q.scanField-1 or nil
++  if not q.scanField then
++    hint(q.scanLost and "CHAT API TIMEOUT" or "CHAT API NOT FOUND")
++    q.scanDone=true -- Keep the result visible until an explicit retry.
++  end
++end
++-- One dynamically registered STRING mailbox; no private CRSF frame number.
++
++local alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
++local function base64(p,first)
++  local out=""
++  for i=first,#p,3 do
++    local v=p[i]*65536+(p[i+1] or 0)*256+(p[i+2] or 0)
++    local a,b=floor(v/262144)%64,floor(v/4096)%64
++    local c,d=floor(v/64)%64,v%64
++    out=out..sub(alphabet,a+1,a+1)..sub(alphabet,b+1,b+1)
++      ..(i+1<=#p and sub(alphabet,c+1,c+1) or "=")
++      ..(i+2<=#p and sub(alphabet,d+1,d+1) or "=")
++  end
++  return out
++end
++local function unbase64(s)
++  if #s==0 or #s>56 or #s%4~=0 then return end
++  local out={0xEF,0xEE}
++  for i=1,#s,4 do
++    local v,pad=0,0
++    for j=0,3 do
++      local c=sub(s,i+j,i+j)
++      local b=string.byte(c)
++      local n
++      if b>=65 and b<=90 then n=b-65
++      elseif b>=97 and b<=122 then n=b-71
++      elseif b>=48 and b<=57 then n=b+4
++      elseif b==43 then n=62 elseif b==47 then n=63 end
++      if n and pad==0 then v=v*64+n
++      elseif c=="=" and i+3==#s and j>=2 then v=v*64; pad=pad+1
++      else return end
++    end
++    if (pad==1 and v%256~=0) or (pad==2 and v%65536~=0) then return end
++    out[#out+1]=floor(v/65536)
++    if pad<2 then out[#out+1]=floor(v/256)%256 end
++    if pad==0 then out[#out+1]=v%256 end
++  end
++  return out
++end
++local function wirePush(frame,data,now)
++  if not q.due(now,q.nextWire) or not crossfireTelemetryPush then return false end
++  if crossfireTelemetryPush(frame,data) then q.nextWire=(now+3)%16777216; return true end
++  return false
++end
++function q.push(op, req, body, now)
++  if not q.mailboxField or q.mailRead then return false end
++  local encoded=base64(q.packet(op,req,body),3)
++  local d={0xEE,0xEF,q.mailboxField}
++  for i=1,#encoded do d[#d+1]=string.byte(encoded,i) end
++  d[#d+1]=0
++  if wirePush(0x2D,d,now) then
++    q.mailRead={chunk=0,bytes={},next=now,since=now,waiting=false}
++    return true
++  end
++  return false
++end
++function q.transportPop(frame,d,now)
++  if type(d)~="table" or #d<2 or #d>60 then return end
++  for i=1,#d do
++    if type(d[i])~="number" or d[i]<0 or d[i]>255 or d[i]%1~=0 then return end
++  end
++  if frame==0x29 and d[2]==0xEE and (d[1]==0xEF or d[1]==0xEA or d[1]==0) then
++    if q.mailboxField or q.scanField or q.mailRead or q.scanDone then return end
++    -- Read the field count relative to the terminated device name, as the
++    -- official ELRS Lua does. Do not infer it from trailing packet bytes.
++    local offset=3
++    while offset<=#d and d[offset]~=0 do offset=offset+1 end
++    if offset+14>#d then return end
++    local count=d[offset+13]
++    q.scanLost=false
++    if count>0 then q.scanField=count; hint("SCANNING CHAT API")
++    else hint("CHAT API NOT FOUND"); q.scanDone=true end
++    return
++  end
++  if d[1]~=0xEF or d[2]~=0xEE then return end
++  if frame~=0x2B or not q.mailRead or not q.mailRead.waiting or #d<5
++    or d[3]~=(q.mailboxField or q.scanField) then return end
++  local r=q.mailRead
++  if r.remaining and d[4]~=r.remaining-1 then return end
++  if d[4]>20 or #r.bytes+#d-4>128 then
++    q.mailRead=nil
++    if not q.mailboxField then q.scanLost=true; nextField(now) end
++    return
++  end
++  for i=5,#d do r.bytes[#r.bytes+1]=d[i] end
++  if not q.mailboxField then
++    -- Other ELRS fields (e.g. packet-rate options) can exceed our mailbox
++    -- buffer. Reject an unrelated type/name immediately, before requesting
++    -- its remaining chunks. Keep partial matching headers for small frames.
++    local bytes=r.bytes
++    local unrelated=#bytes>=2 and bytes[2]%128~=10
++    local expected="ELRS Chat\0"
++    for i=3,math.min(#bytes,12) do
++      if bytes[i]~=string.byte(expected,i-2) then unrelated=true; break end
++    end
++    if unrelated then q.mailRead=nil; nextField(now); return end
++  end
++  if d[4]>0 then
++    r.chunk=r.chunk+1; r.remaining=d[4]; r.waiting=false; r.next=now
++    return
++  end
++  q.mailRead=nil
++  local bytes=r.bytes
++  if #bytes<4 then
++    if not q.mailboxField then q.scanLost=true; nextField(now) end
++    return
++  end
++  local name,lastByte="",nil
++  for i=3,#bytes do
++    if bytes[i]==0 then lastByte=i; break end
++    name=name..string.char(bytes[i])
++  end
++  if name~="ELRS Chat" or bytes[2]%128~=10 or not lastByte then
++    if not q.mailboxField then nextField(now) end
++    return
++  end
++  if not q.mailboxField then
++    q.mailboxField=q.scanField; q.scanField=nil; hint("WAIT CHAT STATUS")
++  end
++  local value=""
++  for i=lastByte+1,#bytes do
++    if bytes[i]==0 then return unbase64(value) end
++    value=value..string.char(bytes[i])
++  end
++end
++function q.transportTick(now)
++  if q.mailRead then
++    if q.elapsed(now,q.mailRead.since)>200 then
++      q.mailRead=nil
++      if not q.mailboxField then q.scanLost=true; nextField(now)
++      else hint("CHAT STATUS TIMEOUT") end
++      return true
++    end
++    if q.due(now,q.mailRead.next) then
++      -- Retry the complete snapshot, never mix a stale chunk with a new one.
++      if q.mailRead.waiting then q.mailRead.chunk=0; q.mailRead.bytes={}; q.mailRead.remaining=nil end
++      if wirePush(0x2C,{0xEE,0xEF,q.mailboxField or q.scanField,q.mailRead.chunk},now) then
++        q.mailRead.waiting=true; q.mailRead.next=(now+50)%16777216
++      end
++    end
++    return true
++  end
++  if not q.mailboxField then
++    if q.scanDone then return true end
++    if q.scanField then
++      q.mailRead={chunk=0,bytes={},next=now,since=now,waiting=false}
++      return q.transportTick(now)
++    elseif q.due(now,q.discoverAt) and wirePush(0x28,{0xEE,0xEF},now) then
++      q.discoverAt=(now+100)%16777216
++      if q.linkHint=="FINDING MODULE" then hint("NO MODULE REPLY") end
++    end
++    return true
++  end
++  return false
++end
+diff --git a/src/lua/ELRSChat/r16/view.lua b/src/lua/ELRSChat/r16/view.lua
+new file mode 100644
+index 00000000..21852a10
+--- /dev/null
++++ b/src/lua/ELRSChat/r16/view.lua
+@@ -0,0 +1,171 @@
++-- ELRS Public Chat r16. GPL-3.0-or-later.
++-- Private per-script state; no globals shared with other Lua tools.
++local q = ...
++local floor, sub = math.floor, string.sub
++local function text(y,s,flags,x)
++  local ink=q.color and (y==0 and q.headerText or (y==56 and q.footerText)) or q.textColor
++  lcd.drawText(x or q.textInset,q.rowY[floor(y/8)],s,(flags or 0)+q.textFont+ink)
++end
++local function header(title)
++  -- 128px needs all 21 cells to keep PUBLIC CHAT READY and the four-digit ID.
++  text(0,title,q.color and 0 or (INVERS or 0),not q.color and q.screenW<=128 and 0 or nil)
++end
++local function footer(s,flags)
++  lcd.drawText(q.textInset,q.footerY,s,(flags or 0)+q.textFont+(q.color and q.footerText or q.textColor))
++end
++local function drawDraft()
++  if q.draftCache~=q.draft then q.draftLines=q.wrap("",q.draft); q.draftCache=q.draft end
++  for i=1,#q.draftLines do text(8+i*8,q.draftLines[i]) end
++end
++function q.draw(now)
++  local linked=q.connected(now) and true or false
++  local alert=not q.pendingExit and q.notice and not q.due(now,q.noticeUntil)
++  local exitWarning=q.pendingExit and q.elapsed(now,q.pendingExit)>=800
++  -- EdgeTX color standalone tools own a persistent bitmap. Keep transport
++  -- running every callback; repaint on changes/input, plus a 1-second refresh.
++  -- Monochrome may clear its shared LCD buffer outside Lua, so always redraw it.
++  if q.color and not q.redraw and linked==q.paintedLink and alert==q.paintedAlert
++      and exitWarning==q.paintedExit and q.elapsed(now,q.lastDraw)<100 then return end
++  q.redraw=false; q.lastDraw=now; q.paintedLink=linked; q.paintedAlert=alert; q.paintedExit=exitWarning
++  if q.color then
++    lcd.clear(q.background)
++    lcd.drawFilledRectangle(0,0,q.screenW,q.textTop+q.textHeight+2,q.headerColor)
++    lcd.drawFilledRectangle(0,q.footerY-2,q.screenW,q.screenH-q.footerY+2,q.footerColor)
++  else lcd.clear() end
++  local link=q.connected(now) and (q.mode==0 and "RC" or (q.owner and (q.states[q.state] or "?") or "BUSY")) or "NO LINK"
++  if q.pendingExit then
++    header("RETURNING TO RC")
++    text(16,"WAIT FOR MODULE...")
++    if q.elapsed(now,q.pendingExit)>=800 then
++      text(32,"RC NOT CONFIRMED")
++      text(40,"CHECK MODULE / LINK")
++      text(56,"EXIT:CLOSE ANYWAY")
++    end
++  elseif q.view=="entry" then
++    header("ENTER PUBLIC CHAT?")
++    text(16,"RC CONTROL WILL STOP")
++    text(24,q.configError or (q.needEnter and "ENTERING..." or
++      (not linked and (q.linkHint or "FINDING MODULE") or (q.result==4 and "READY" or (q.results[q.result] or "READY")))))
++    if q.configLabel then text(32,q.configLabel) end
++    text(56,"ENT:CHAT  EXIT:CLOSE")
++  elseif q.view=="home" then
++    -- Position ID in pixels: spaces are proportional on color displays.
++    local title="PUBLIC CHAT "..(not q.sendBlockReason(now) and "READY" or (link=="NO LINK" and "OFF" or link))
++    header(title)
++    if q.color then
++      text(0,q.ownId,RIGHT or 0,q.idX)
++    else
++      -- Monochrome RIGHT measures proportional glyph widths even when
++      -- FIXEDWIDTH is set, so place these four fixed 6px cells ourselves.
++      text(0,q.ownId,INVERS or 0,q.idX)
++    end
++    if #q.logLines>0 then
++      for i=0,q.logRows-1 do
++        local line=q.logLines[q.scroll+i]
++        if line then
++          local y=q.logTop+i*q.logHeight
++          if q.color and q.logShades[q.scroll+i] then
++            -- Shade all received lines, including wrapped continuations.
++            lcd.drawFilledRectangle(q.edge,y,q.screenW-2*q.edge,q.logHeight,q.stripeColor)
++          end
++          lcd.drawText(q.textInset,y+(q.color and 1 or 0),line,q.textFont+q.textColor)
++        end
++      end
++    else
++      text(16,"NO MESSAGES YET")
++      if not q.connected(now) then text(32,"Enable ELRS / CRSF") end
++    end
++    if not alert then footer("ENT:MENU +/-:SCROLL") end
++  elseif q.view=="menu" or q.view=="presets" then
++    local list=q.view=="menu" and q.menu or q.presets
++    header(q.view=="menu" and "CHAT MENU" or "PRESET MESSAGE")
++    local first=math.max(1,q.choice-q.menuRows+1)
++    for i=first,math.min(#list,first+q.menuRows-1) do
++      lcd.drawText(q.textInset,q.rowY[1]+(i-first)*q.lineHeight,q.view=="presets" and q.presetLabels[i] or list[i],
++        (i==q.choice and (INVERS or 0) or 0)+q.textFont+q.textColor)
++    end
++    text(56,"ENT:SELECT  EXIT:BACK")
++  elseif q.view=="compose" then
++    header("WRITE "..#q.draft.."/"..q.maxText)
++    drawDraft()
++    local pick
++    if q.picker<=#q.chars then pick=q.picker==1 and "SPACE" or sub(q.chars,q.picker,q.picker)
++    else pick=q.actions[q.picker-#q.chars] end
++    text(40,"[ "..pick.." ]",INVERS or 0)
++    if not alert then text(48,"HOLD ENT:SEND") end
++    text(56,"+/-:PICK  ENT:USE")
++  elseif q.view=="confirm" then
++    header("SEND TO PUBLIC ROOM?")
++    drawDraft()
++    text(56,"ENT:SEND   EXIT:BACK")
++  elseif q.view=="info" then
++    header("MODULE INFO")
++    text(8,link.." "..(q.result==4 and "READY" or (q.results[q.result] or "")))
++    text(16,"ID "..q.ownId.." PROFILE "..q.profile)
++    text(24,string.format("%.3f MHz",q.frequency/1000000))
++    text(32,"POWER "..(q.powers[q.power+1] or 0).."mW")
++    text(40,"DROP "..q.dropped)
++    if not alert then text(48,"LUA R16") end
++    text(56,"EXIT:BACK")
++  end
++  if alert then
++    if q.view=="home" then footer(q.notice,INVERS or 0)
++    else text(48,q.notice,INVERS or 0) end
++  end
++end
++function q.initLayout()
++  -- EdgeTX provides the native full-screen dimensions; no radio-name table.
++  q.screenW=LCD_W or 128; q.screenH=LCD_H or 64
++  q.color = lcd.RGB ~= nil and q.screenH >= 128
++  q.edge=q.color and math.max(4,math.min(12,floor(math.min(q.screenW,q.screenH)/40))) or 0
++  q.textInset=q.color and q.edge+2 or floor((q.screenW%6)/2)
++  q.textTop=q.color and q.edge+2 or floor((q.screenH%8)/2)
++  q.contentWidth=q.screenW-2*q.textInset
++  local rowLimit=floor((q.screenH-2*q.textTop)/8)
++  q.textHeight=q.color and rowLimit-4 or 8
++  q.textFont=q.color and 0 or (FIXEDWIDTH or 0)
++  if q.color and lcd.sizeText then
++    -- W is not necessarily the widest glyph. Check the full printable wire
++    -- alphabet and remeasure each smaller font, including inverse margins.
++    for _,font in ipairs({0,SMLSIZE or 0,TINSIZE or SMLSIZE or 0}) do
++      local widest, tallest=0,0
++      for c=32,126 do
++        local w,h=lcd.sizeText(string.char(c),font)
++        widest=math.max(widest,w); tallest=math.max(tallest,h)
++      end
++      q.textFont=font; q.textHeight=tallest
++      if widest*21+4<=q.contentWidth and tallest+4<=rowLimit then break end
++    end
++  elseif q.color then
++    q.textFont=SMLSIZE or 0
++  end
++  q.textColor=q.color and lcd.RGB(0,0,0) or 0
++  q.background=q.color and lcd.RGB(255,255,255) or 0
++  q.stripeColor=q.color and lcd.RGB(208,208,208) or 0
++  q.headerColor=q.color and lcd.RGB(50,66,82) or 0
++  q.headerText=q.color and lcd.RGB(248,250,252) or 0
++  q.footerColor=q.color and lcd.RGB(229,235,241) or 0
++  q.footerText=q.color and lcd.RGB(61,76,91) or 0
++  -- Fit only menu labels; confirmation and RF retain the full preset text.
++  -- Cache once at init, so scrolling never measures or allocates labels.
++  q.presetLabels={}
++  for i=1,#q.presets do
++    local label=q.presets[i]
++    if not q.fits(label) then
++      local n=#label
++      repeat n=n-1; label=sub(q.presets[i],1,n).."..." until n==0 or q.fits(label)
++    end
++    q.presetLabels[i]=label
++  end
++  q.footerY=q.screenH-q.textTop-q.textHeight
++  q.lineHeight=q.color and math.min(q.textHeight+6,floor((q.footerY-q.textTop)/7)) or 8
++  q.rowY={}
++  for i=0,5 do q.rowY[i]=q.textTop+i*q.lineHeight end
++  q.rowY[6]=q.footerY-q.lineHeight; q.rowY[7]=q.footerY
++  q.menuRows=math.min(#q.presets,math.max(1,
++    floor((q.rowY[6]-(q.color and 4 or 0)-q.rowY[1]-q.textHeight)/q.lineHeight)+1))
++  q.idX=q.color and q.screenW-q.textInset or q.screenW-24-(q.screenW>128 and q.textInset or 0)
++  q.logTop=q.color and q.textTop+q.textHeight+4 or q.rowY[1]
++  q.logHeight=q.textHeight+(q.color and 2 or 0)
++  q.logRows=math.max(1,floor((q.footerY-(q.color and 4 or 0)-q.logTop)/q.logHeight))
++end
+diff --git a/src/src/rxtx_common.cpp b/src/src/rxtx_common.cpp
+index 6b5b10d3..11d54652 100644
+--- a/src/src/rxtx_common.cpp
++++ b/src/src/rxtx_common.cpp
+@@ -84,6 +84,15 @@ void deferExecutionMicros(unsigned long us, std::function<void()> f)
+     DBGLN("No more deferred function slots available!");
+ }
+ 
++#if defined(ELRS_CHAT) && defined(TARGET_TX)
++bool hasDeferredFunction()
++{
++    for (int i = 0; i < maxDeferredFunctions; ++i)
++        if (deferred[i].function != nullptr) return true;
++    return false;
++}
++#endif
++
+ void executeDeferredFunction(unsigned long now)
+ {
+     // execute deferred function if its time has elapsed
+diff --git a/src/src/tx_main.cpp b/src/src/tx_main.cpp
+index 34e90655..7cb54355 100644
+--- a/src/src/tx_main.cpp
++++ b/src/src/tx_main.cpp
+@@ -1,4 +1,7 @@
+ #include "rxtx_common.h"
++#ifdef ELRS_CHAT
++#include "ChatDevice.h" // ELRS_CHAT_RUNTIME_V3
++#endif
+ 
+ #include "CRSFHandset.h"
+ #include "CRSFParameters.h"
+@@ -657,6 +660,9 @@ void ICACHE_RAM_ATTR nonceAdvance()
+  */
+ void ICACHE_RAM_ATTR timerCallback()
+ {
++#ifdef ELRS_CHAT
++  if (chatDeviceActive()) return;
++#endif
+   /* If we are busy writing to EEPROM (committing config changes) then we just advance the nonces, i.e. no SPI traffic */
+   if (commitInProgress)
+   {
+@@ -713,6 +719,10 @@ void ICACHE_RAM_ATTR timerCallback()
+ 
+ static void UARTdisconnected()
+ {
++#ifdef ELRS_CHAT
++  chatHandsetPresent = false;
++  if (chatDeviceActive()) { chatDeviceDisconnected(); return; }
++#endif
+   hwTimer::stop();
+   setConnectionState(noCrossfire);
+   // Since not going from connected -> disconnected, set LQ=0 to make sure the handset knows we stopped TXing when it comes back
+@@ -721,6 +731,10 @@ static void UARTdisconnected()
+ 
+ static void UARTconnected()
+ {
++#ifdef ELRS_CHAT
++  chatHandsetPresent = true;
++  if (chatDeviceActive()) { chatHandsetNeedsModel = true; return; }
++#endif
+   webserverPreventAutoStart = true;
+   rfModeLastChangedMS = millis(); // force syncspam on first packets
+ 
+@@ -771,6 +785,9 @@ static void ChangeRadioParams()
+ 
+ void ModelUpdateReq()
+ {
++#ifdef ELRS_CHAT
++  chatHandsetNeedsModel = false;
++#endif
+   // Force synspam with the current rate parameters in case already have a connection established
+   if (config.SetModelId(crsfTransmitter.modelId))
+   {
+@@ -827,6 +844,9 @@ static void CheckConfigChangePending()
+ 
+ bool ICACHE_RAM_ATTR RXdoneISR(SX12xxDriverCommon::rx_status const status)
+ {
++#ifdef ELRS_CHAT
++  if (chatDeviceActive()) return false;
++#endif
+   // busyTransmitting is required here to prevent accidental rxdone IRQs due to interference triggering RXdoneISR.
+   if (LqTQly.currentIsSet() || busyTransmitting)
+   {
+@@ -840,6 +860,9 @@ bool ICACHE_RAM_ATTR RXdoneISR(SX12xxDriverCommon::rx_status const status)
+ 
+ void ICACHE_RAM_ATTR TXdoneISR()
+ {
++#ifdef ELRS_CHAT
++  if (chatDeviceActive()) return;
++#endif
+   if (!busyTransmitting)
+   {
+     return; // Already finished transmission and do not call HandleFHSS() a second time, which may hop the frequency!
+@@ -1004,6 +1027,9 @@ void SendUIDOverMSP()
+ 
+ static void EnterBindingMode()
+ {
++#ifdef ELRS_CHAT
++  if (chatDeviceActive()) return;
++#endif
+   if (InBindingMode)
+       return;
+ 
+@@ -1405,6 +1431,10 @@ static void checkSendLinkStatsToHandset(uint32_t now)
+   }
+ }
+ 
++#ifdef ELRS_CHAT
++#include "ChatRcIntegration.h"
++#endif
++
+ void setup()
+ {
+   if (setupHardwareFromOptions())
+@@ -1471,6 +1501,9 @@ void setup()
+       hwTimer::init(nullptr, timerCallback);
+       setConnectionState(noCrossfire);
+     }
++#ifdef ELRS_CHAT
++    chatDeviceBegin(init_success);
++#endif
+   }
+   else
+   {
+@@ -1496,6 +1529,14 @@ void setup()
+ void loop()
+ {
+   uint32_t now = millis();
++#ifdef ELRS_CHAT
++  if (chatDeviceScheduled) chatDeviceLoop(now);
++  if (chatDeviceActive()) {
++    devicesUpdate(now);
++    checkRebootTime(now);
++    return;
++  }
++#endif
+ 
+   HandleUARTout(); // Only used for non-CRSF output
+ 
+diff --git a/src/test/test_elrs_chat/test_chat.cpp b/src/test/test_elrs_chat/test_chat.cpp
+new file mode 100644
+index 00000000..3d1553e4
+--- /dev/null
++++ b/src/test/test_elrs_chat/test_chat.cpp
+@@ -0,0 +1,79 @@
++#include <unity.h>
++#include "ChatMailbox.h"
++#include "ChatSession.h"
++#include "ChatProfile.h"
++#include "../../lib/DEVICE/DevicePause.h"
++
++void setUp() {}
++void tearDown() {}
++
++void existing_crsf_frames_are_not_claimed() {
++    chat::Mailbox box; box.field = 42;
++    const uint8_t p[] = {0xee,0xef,42,0};
++    for (unsigned type = 0; type < 256; ++type)
++        TEST_ASSERT_EQUAL(type == 0x2c || type == 0x2d, box.addressed(type,p,sizeof(p)));
++    const uint8_t foreign[] = {0xec,0xef,42,0};
++    TEST_ASSERT_FALSE(box.addressed(0x2d,foreign,sizeof(foreign)));
++}
++
++void parameter_chunks_are_stable_and_bounded() {
++    chat::Mailbox box; box.field = 42;
++    uint8_t bytes[42]; for (unsigned i = 0; i < sizeof(bytes); ++i) bytes[i] = i;
++    box.reply(bytes,sizeof(bytes));
++    uint8_t chunk0[64], chunk1[64], repeat[64];
++    TEST_ASSERT_EQUAL(60,box.read(0,64,chunk0));
++    TEST_ASSERT_EQUAL(1,chunk0[3]);
++    const unsigned n=box.read(1,64,chunk1);
++    box.reply(bytes,1);
++    TEST_ASSERT_EQUAL(n,box.read(1,64,repeat));
++    TEST_ASSERT_EQUAL_MEMORY(chunk1,repeat,n);
++    TEST_ASSERT_EQUAL(0,box.read(255,64,repeat));
++    TEST_ASSERT_EQUAL(0,box.read(0,8,repeat));
++}
++
++void invalid_base64_cannot_become_a_command() {
++    uint8_t out[42];
++    TEST_ASSERT_EQUAL(0,chat::Mailbox::decode(reinterpret_cast<const uint8_t *>("AB=="),4,out,42));
++    TEST_ASSERT_EQUAL(0,chat::Mailbox::decode(reinterpret_cast<const uint8_t *>("AA=A"),4,out,42));
++    TEST_ASSERT_EQUAL(0,chat::Mailbox::decode(reinterpret_cast<const uint8_t *>("AAAA"),4,out,2));
++}
++
++void pause_waits_for_the_other_core_boundary() {
++    elrs::DevicePause gate;
++    auto ticket=gate.request(2); gate.boundary(1);
++    TEST_ASSERT_FALSE(gate.acknowledged(ticket));
++    gate.boundary(0);
++    TEST_ASSERT_TRUE(gate.acknowledged(ticket));
++    TEST_ASSERT_TRUE(gate.paused(0,1));
++    ticket=gate.request(0);
++    TEST_ASSERT_FALSE(gate.acknowledged(ticket));
++    gate.boundary(0);
++    TEST_ASSERT_TRUE(gate.acknowledged(ticket));
++    ticket=gate.request(2); gate.boundary(0);
++    gate.request(0); ticket=gate.request(2);
++    TEST_ASSERT_FALSE(gate.acknowledged(ticket));
++}
++
++void runtime_profile_checks_band_and_calibrated_power() {
++    chat::Profile p; p.frequency=2440123000UL; p.power=6;
++    TEST_ASSERT_TRUE(chat::selectSupportedProfile(p,0,6,false,true));
++    TEST_ASSERT_EQUAL(1,p.id);
++    p.power=7;
++    TEST_ASSERT_FALSE(chat::selectSupportedProfile(p,0,6,false,true));
++    p.power=1; p.frequency=915000000;
++    TEST_ASSERT_FALSE(chat::selectSupportedProfile(p,0,6,false,true));
++    TEST_ASSERT_TRUE(chat::selectSupportedProfile(p,0,6,true,false));
++    TEST_ASSERT_EQUAL(2,p.id);
++    p.frequency=0;
++    TEST_ASSERT_FALSE(chat::selectSupportedProfile(p,0,6,true,true));
++}
++
++int main() {
++    UNITY_BEGIN();
++    RUN_TEST(existing_crsf_frames_are_not_claimed);
++    RUN_TEST(parameter_chunks_are_stable_and_bounded);
++    RUN_TEST(invalid_base64_cannot_become_a_command);
++    RUN_TEST(pause_waits_for_the_other_core_boundary);
++    RUN_TEST(runtime_profile_checks_band_and_calibrated_power);
++    return UNITY_END();
++}

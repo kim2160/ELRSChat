@@ -1,4 +1,7 @@
 #include "rxtx_common.h"
+#ifdef ELRS_CHAT
+#include "ChatDevice.h" // ELRS_CHAT_RUNTIME_V3
+#endif
 
 #include "CRSFHandset.h"
 #include "CRSFParameters.h"
@@ -657,6 +660,9 @@ void ICACHE_RAM_ATTR nonceAdvance()
  */
 void ICACHE_RAM_ATTR timerCallback()
 {
+#ifdef ELRS_CHAT
+  if (chatDeviceActive()) return;
+#endif
   /* If we are busy writing to EEPROM (committing config changes) then we just advance the nonces, i.e. no SPI traffic */
   if (commitInProgress)
   {
@@ -713,6 +719,10 @@ void ICACHE_RAM_ATTR timerCallback()
 
 static void UARTdisconnected()
 {
+#ifdef ELRS_CHAT
+  chatHandsetPresent = false;
+  if (chatDeviceActive()) { chatDeviceDisconnected(); return; }
+#endif
   hwTimer::stop();
   setConnectionState(noCrossfire);
   // Since not going from connected -> disconnected, set LQ=0 to make sure the handset knows we stopped TXing when it comes back
@@ -721,6 +731,10 @@ static void UARTdisconnected()
 
 static void UARTconnected()
 {
+#ifdef ELRS_CHAT
+  chatHandsetPresent = true;
+  if (chatDeviceActive()) { chatHandsetNeedsModel = true; return; }
+#endif
   webserverPreventAutoStart = true;
   rfModeLastChangedMS = millis(); // force syncspam on first packets
 
@@ -771,6 +785,9 @@ static void ChangeRadioParams()
 
 void ModelUpdateReq()
 {
+#ifdef ELRS_CHAT
+  chatHandsetNeedsModel = false;
+#endif
   // Force synspam with the current rate parameters in case already have a connection established
   if (config.SetModelId(crsfTransmitter.modelId))
   {
@@ -827,6 +844,9 @@ static void CheckConfigChangePending()
 
 bool ICACHE_RAM_ATTR RXdoneISR(SX12xxDriverCommon::rx_status const status)
 {
+#ifdef ELRS_CHAT
+  if (chatDeviceActive()) return false;
+#endif
   // busyTransmitting is required here to prevent accidental rxdone IRQs due to interference triggering RXdoneISR.
   if (LqTQly.currentIsSet() || busyTransmitting)
   {
@@ -840,6 +860,9 @@ bool ICACHE_RAM_ATTR RXdoneISR(SX12xxDriverCommon::rx_status const status)
 
 void ICACHE_RAM_ATTR TXdoneISR()
 {
+#ifdef ELRS_CHAT
+  if (chatDeviceActive()) return;
+#endif
   if (!busyTransmitting)
   {
     return; // Already finished transmission and do not call HandleFHSS() a second time, which may hop the frequency!
@@ -1004,6 +1027,9 @@ void SendUIDOverMSP()
 
 static void EnterBindingMode()
 {
+#ifdef ELRS_CHAT
+  if (chatDeviceActive()) return;
+#endif
   if (InBindingMode)
       return;
 
@@ -1405,6 +1431,10 @@ static void checkSendLinkStatsToHandset(uint32_t now)
   }
 }
 
+#ifdef ELRS_CHAT
+#include "ChatRcIntegration.h"
+#endif
+
 void setup()
 {
   if (setupHardwareFromOptions())
@@ -1471,6 +1501,9 @@ void setup()
       hwTimer::init(nullptr, timerCallback);
       setConnectionState(noCrossfire);
     }
+#ifdef ELRS_CHAT
+    chatDeviceBegin(init_success);
+#endif
   }
   else
   {
@@ -1496,6 +1529,14 @@ void setup()
 void loop()
 {
   uint32_t now = millis();
+#ifdef ELRS_CHAT
+  if (chatDeviceScheduled) chatDeviceLoop(now);
+  if (chatDeviceActive()) {
+    devicesUpdate(now);
+    checkRebootTime(now);
+    return;
+  }
+#endif
 
   HandleUARTout(); // Only used for non-CRSF output
 
