@@ -37,7 +37,7 @@ ELRSChat/
 └── docs/chat-development.md     # 빌드·테스트 안내
 ```
 
-바로가기: [Lua 실행 파일](src/lua/ELRSChat.lua) · [필수 Lua 보조 파일](src/lua/ELRSChat/r16) · [소스 전체 diff](patches/elrs-4.1.0-chat.patch)
+바로가기: [펌웨어 빌드](#펌웨어-빌드) · [Lua 실행 파일](src/lua/ELRSChat.lua) · [필수 Lua 보조 파일](src/lua/ELRSChat/r16) · [소스 전체 diff](patches/elrs-4.1.0-chat.patch)
 
 ## 프로젝트 소개
 
@@ -69,6 +69,102 @@ ELRSChat 변경 공개일: **2026-09-19**. 출처와 라이선스는 [NOTICE.md]
 - 128×64 흑백부터 컬러 화면까지 해상도와 글자 폭에 맞춰 배치.
 - `Tx:메시지`, `Rx(ID):메시지` 표시. 네 자리 ID는 장치 ID의 화면용 축약값입니다.
 - 주파수·출력은 Lua 설정으로 요청하고, 모듈에서 검증한 후 채팅 동안만 적용합니다.
+
+## 펌웨어 빌드
+
+코드를 수정하거나 패치를 따로 적용할 필요는 없습니다. 아래 명령을 사용하세요.
+기본 `platformio.ini`로 일반 ELRS 빌드만 하면 **채팅 기능이 활성화되지 않습니다**.
+
+### 1. 소스 내려받기
+
+[Python](https://www.python.org/downloads/) 3.10 이상과
+[Git](https://git-scm.com/downloads/)을 설치합니다. Windows에서는 Python 설치 시
+**Add to PATH**를 선택하세요. Windows는 PowerShell, macOS/Linux는 터미널을 열고 실행합니다.
+
+```sh
+git clone https://github.com/kim2160/ELRSChat.git
+cd ELRSChat
+python -m venv .venv
+```
+
+macOS/Linux에서는 마지막 명령의 `python`을 `python3`로 바꿉니다.
+이어서 운영체제에 맞는 명령 하나로 빌드 환경을 활성화합니다.
+
+| 운영체제 | 명령 |
+|---|---|
+| Windows PowerShell | `.\.venv\Scripts\Activate.ps1` |
+| Windows 명령 프롬프트 | `.venv\Scripts\activate.bat` |
+| macOS/Linux | `source .venv/bin/activate` |
+
+PowerShell에서 활성화가 차단되면 명령 프롬프트를 열어 해당 활성화 명령을 사용하세요.
+이후 명령도 활성화한 터미널의 `ELRSChat` 폴더에서 실행합니다.
+
+### 2. 빌드 준비
+
+```sh
+python -m pip install platformio==6.1.19
+python tools/prepare_chat.py
+```
+
+빌드에 필요한 파일을 내려받으므로 인터넷 연결이 필요합니다.
+
+### 3. 내 모듈용 펌웨어 만들기
+
+**자기 모델에 맞는 명령 하나만** 실행합니다. 아래 예제는 **내장 2.4 GHz ELRS**
+모듈용이며, Lua 기본값과 같은 **2440 MHz / 25 mW**로 설정합니다.
+
+**Jumper T15:**
+
+```sh
+python tools/build_chat.py --mcu ESP32 --radio 2400 --board jumper.tx_2400.t-15 --frequency 2440000000 --power-mw 25 --experimental-rf
+```
+
+**HelloRadio V14:**
+
+```sh
+python tools/build_chat.py --mcu ESP32 --radio 2400 --board helloradio.tx_2400.v14 --frequency 2440000000 --power-mw 25 --experimental-rf
+```
+
+`--experimental-rf`는 실험용 채팅 무선 모드를 켜는 옵션이므로 빼지 마세요.
+처음에는 추가 파일을 내려받아 빌드에 몇 분 이상 걸릴 수 있습니다.
+여러 모델을 빌드할 때는 하나씩 순서대로 실행합니다.
+
+<details>
+<summary>다른 ELRS 송신 모듈을 사용한다면?</summary>
+
+다른 **ESP32 + 2.4 GHz** 모듈은 먼저 보드 목록을 확인합니다.
+
+```sh
+python tools/build_chat.py --mcu ESP32 --radio 2400 --list-boards
+```
+
+위 빌드 명령의 `--board` 뒤 값을 목록에 나온 자기 모듈의 정확한 이름으로 바꿉니다.
+`--board`를 생략하거나 이름이 비슷한 다른 모델을 선택하지 마세요.
+내장 모듈과 외장 모듈의 보드는 서로 다를 수 있습니다.
+
+칩 계열이 다르면 `src/hardware/targets.json`에서 해당 모듈의 `firmware` 값을 확인합니다.
+예를 들어 `Unified_ESP32S3_2400_TX`는 `--mcu ESP32S3 --radio 2400`에 해당합니다.
+보드 목록 조회와 빌드 명령 모두 이 값으로 바꿉니다.
+900 MHz/LR1121 설정은 [상세 빌드 안내](docs/chat-development.md)를 참고하세요.
+Gemini/듀얼 RF 모듈은 지원하지 않으며, 목록에 있다는 것만으로 해당 모델의
+ELRSChat 동작이 검증된 것은 아닙니다.
+
+</details>
+
+### 4. 결과 파일 확인 및 Lua 설치
+
+빌드가 끝나면 터미널에 `Build saved:`와 저장 폴더가 표시됩니다.
+위 예제의 결과 파일은 다음과 같습니다. 자기 모델의 파일을 사용하세요.
+
+```text
+dist/Unified_ESP32_2400_TX_CHAT/jumper.tx_2400.t-15/firmware.bin
+dist/Unified_ESP32_2400_TX_CHAT/helloradio.tx_2400.v14/firmware.bin
+```
+
+빌드는 파일만 만들며 조종기에 자동으로 설치하지 않습니다. 생성한 `firmware.bin`은
+[ELRS Wi-Fi 업데이트 화면](https://www.expresslrs.org/software/updating/wifi-updating/) 등
+해당 기기의 일반적인 **ELRS 모듈 업데이트 방법**으로 설치합니다.
+EdgeTX 본체 펌웨어 업데이트가 아닙니다. 이후 아래 안내대로 Lua 파일을 복사합니다.
 
 ## Lua 설치
 

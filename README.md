@@ -37,7 +37,7 @@ ELRSChat/
 └── docs/chat-development.md     # Build and test guide
 ```
 
-Quick links: [Lua tool](src/lua/ELRSChat.lua) · [Required Lua modules](src/lua/ELRSChat/r16) · [Full source diff](patches/elrs-4.1.0-chat.patch)
+Quick links: [Build firmware](#build-firmware) · [Lua tool](src/lua/ELRSChat.lua) · [Required Lua modules](src/lua/ELRSChat/r16) · [Full source diff](patches/elrs-4.1.0-chat.patch)
 
 ## Overview
 
@@ -69,6 +69,102 @@ The module's normal RC link is suspended while chat is active. RC control and ch
 - Layout adapts to screen resolution and text width, from 128×64 monochrome to color displays.
 - `Tx:message` and `Rx(ID):message` labels. The four-digit display ID is a shortened device identifier.
 - Lua requests the chat frequency and power; the module validates and applies them only for the chat session.
+
+## Build firmware
+
+No code editing or patching is needed. Use the commands below: a normal ELRS
+build with the default `platformio.ini` does **not** enable chat.
+
+### 1. Get the source
+
+Install [Python](https://www.python.org/downloads/) (3.10 or later) and
+[Git](https://git-scm.com/downloads/). On Windows, enable Python's **Add to PATH**
+option. Open PowerShell on Windows, or Terminal on macOS/Linux:
+
+```sh
+git clone https://github.com/kim2160/ELRSChat.git
+cd ELRSChat
+python -m venv .venv
+```
+
+On macOS/Linux, use `python3` instead of `python` for that last command.
+Activate the environment using the line for your system:
+
+| System | Command |
+|---|---|
+| Windows PowerShell | `.\.venv\Scripts\Activate.ps1` |
+| Windows Command Prompt | `.venv\Scripts\activate.bat` |
+| macOS/Linux | `source .venv/bin/activate` |
+
+If PowerShell blocks activation, use Command Prompt and its activation command.
+Keep using this terminal in the `ELRSChat` folder for the following steps.
+
+### 2. Prepare the build
+
+```sh
+python -m pip install platformio==6.1.19
+python tools/prepare_chat.py
+```
+
+An internet connection is needed to download the build dependencies.
+
+### 3. Build for your module
+
+Run **only the command for your model**. These examples are for the internal
+**2.4 GHz ELRS** modules and match the Lua defaults: **2440 MHz / 25 mW**.
+
+**Jumper T15:**
+
+```sh
+python tools/build_chat.py --mcu ESP32 --radio 2400 --board jumper.tx_2400.t-15 --frequency 2440000000 --power-mw 25 --experimental-rf
+```
+
+**HelloRadio V14:**
+
+```sh
+python tools/build_chat.py --mcu ESP32 --radio 2400 --board helloradio.tx_2400.v14 --frequency 2440000000 --power-mw 25 --experimental-rf
+```
+
+`--experimental-rf` enables the experimental chat radio mode; keep it in the
+command. The first build downloads extra packages and can take several minutes.
+Build one model at a time.
+
+<details>
+<summary>Using another ELRS transmitter module?</summary>
+
+For another **ESP32 + 2.4 GHz** module, list the available boards:
+
+```sh
+python tools/build_chat.py --mcu ESP32 --radio 2400 --list-boards
+```
+
+Replace the value after `--board` in a build command above with the exact key
+shown for your module. Do not omit `--board` or choose a similar-looking model.
+Internal and external modules may use different boards.
+
+For other chip families, check your module's `firmware` entry in
+`src/hardware/targets.json`: for example, `Unified_ESP32S3_2400_TX` means
+`--mcu ESP32S3 --radio 2400`. Use those values when listing boards and building.
+For 900 MHz/LR1121 options, see the [detailed build guide](docs/chat-development.md).
+Gemini/dual-RF modules are unsupported; an available board entry does not mean
+ELRSChat has been tested on that model.
+
+</details>
+
+### 4. Find the firmware and install Lua
+
+After a successful build, the terminal prints `Build saved:` and the output
+folder. For the examples above, use the matching file:
+
+```text
+dist/Unified_ESP32_2400_TX_CHAT/jumper.tx_2400.t-15/firmware.bin
+dist/Unified_ESP32_2400_TX_CHAT/helloradio.tx_2400.v14/firmware.bin
+```
+
+The build only creates files; it does not flash your radio. Install your model's
+`firmware.bin` using its normal **ELRS module** update method, such as the
+[ELRS Wi-Fi update page](https://www.expresslrs.org/software/updating/wifi-updating/).
+This is not an EdgeTX firmware update. Then copy the Lua files as described below.
 
 ## Install the Lua tool
 
